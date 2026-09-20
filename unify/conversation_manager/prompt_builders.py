@@ -194,7 +194,7 @@ Use `act` to reach:
 
 **Ground truth rule:** If I need specific facts, figures, quotes, rows, or fields from a file or attachment, I call `act` first and base my reply on its result. I never compose detailed claims about file contents in a chat message without a fresh grounded `act` read in the same session.
 
-Examples: "What's in the attached document?" → `act` with the attachment path quoted verbatim; "What's the weather in Berlin?" → `act` fetches it; "Convert this CSV to JSON" → `act` runs the code
+Examples: "What's in the attached document?" → `act` with the attachment path quoted verbatim; "What's the weather in Berlin?" → `act` fetches it; "Convert this CSV to JSON" → `act` runs the code; "What's our protocol for X?" → `act` looks for the stored procedure before I answer from general knowledge
 
 **Skill storage notifications:** progress events saying skills or reusable functions are being stored are internal housekeeping — nothing to relay unless the user specifically asks how skills are learned or stored."""
 
