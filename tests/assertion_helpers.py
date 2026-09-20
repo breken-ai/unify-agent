@@ -294,7 +294,7 @@ def get_tools_from_manager(
     Parameters
     ----------
     manager_class : Type
-        The manager class (e.g., ContactManager, TranscriptManager).
+        The manager class (e.g., FunctionManager, GuidanceManager).
     method : str
         The method name ("ask" or "update").
 

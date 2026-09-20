@@ -103,7 +103,6 @@ _unity_parallel_run_complete() {
         '--symbolic-only[Run only symbolic tests]' \
         '--deterministic-only[Run only tests with no model in the loop]' \
         '--repeat[Repeat count]:count:(2 3 5 10)' \
-        '--overwrite-scenarios[Delete and recreate test scenarios]' \
         '-h[Show help]' \
         '--help[Show help]' \
         '*:test path:_files'

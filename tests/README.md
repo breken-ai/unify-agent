@@ -29,7 +29,7 @@ shared state between sessions.
 tests/parallel_run.sh tests/
 
 # Run a specific folder
-tests/parallel_run.sh tests/contact_manager/
+tests/parallel_run.sh tests/function_manager/
 
 # Run with a whole-run timeout
 tests/parallel_run.sh --timeout 300 tests/
@@ -84,7 +84,7 @@ When `UNILLM_CACHE="true"` (the default), all LLM responses are cached:
 
 Both test types become deterministic after caching. To re-evaluate LLM behavior:
 ```bash
-parallel_run --no-cache tests/contact_manager/test_ask.py
+parallel_run --no-cache tests/guidance_manager/test_skill_migration.py
 ```
 
 The cache is keyed on the exact LLM input, so a prompt or docstring change
@@ -155,7 +155,6 @@ parallel_run --symbolic-only tests/              # Only symbolic tests
 parallel_run --env KEY=VALUE tests/              # Set environment variable
 parallel_run --no-cache tests/                   # Fresh LLM inference
 parallel_run --repeat 5 tests/                   # Run each test 5 times
-parallel_run --overwrite-scenarios tests/        # Delete and recreate test scenarios
 
 # Pass extra args directly to pytest (after --)
 parallel_run tests/ -- -v --tb=short            # Verbose with short tracebacks
@@ -177,7 +176,6 @@ parallel_run tests/ -- -k 'pattern'             # Filter by test name
 | `--no-cache` | Shorthand for `--env UNILLM_CACHE=false` |
 | `--repeat N` | Run each test N times |
 | `--tags TAG` | Tag runs for filtering |
-| `--overwrite-scenarios` | Delete and recreate test scenarios |
 | `--` | Pass remaining args to pytest |
 
 Exit codes: `0` all passed, `1` something failed, `2` whole-run timeout.
@@ -201,7 +199,7 @@ Set `UNIFY_STORE_PATH` yourself (in the environment, in `.env`, or via
 one store, and nothing deletes it afterwards.
 
 ```bash
-parallel_run --env UNIFY_STORE_PATH=/tmp/shared.sqlite tests/knowledge_manager/
+parallel_run --env UNIFY_STORE_PATH=/tmp/shared.sqlite tests/guidance_manager/
 ```
 
 A bare `pytest` invocation (no runner) gets a per-process store under the
@@ -215,7 +213,7 @@ system temp directory, removed when the process exits.
 
 ```bash
 # Terminal 1: Run tests
-parallel_run tests/contact_manager/
+parallel_run tests/function_manager/
 
 # Terminal 2: Watch (optional - inline feedback is shown by default)
 watch_tests
@@ -228,14 +226,14 @@ watch_tests
 watch_tests                    # Look for f ❌ prefix
 
 # Attach to see full output
-attach 'f ❌ contact_manager-test_ask'
+attach 'f ❌ guidance_manager-test_skill_migration'
 
 # Or check the log file
 ls logs/pytest/*/             # Find the run directory
-cat logs/pytest/2025-12-05T14-30-22_unity_dev_ttys042/contact_manager-test_ask.txt
+cat logs/pytest/2025-12-05T14-30-22_unity_dev_ttys042/guidance_manager-test_skill_migration.txt
 
 # Query the store the session left behind
-sqlite3 logs/pytest/2025-12-05T14-30-22_unity_dev_ttys042/stores/contact_manager-test_ask.sqlite
+sqlite3 logs/pytest/2025-12-05T14-30-22_unity_dev_ttys042/stores/guidance_manager-test_skill_migration.sqlite
 ```
 
 ### Clean up after tests
@@ -251,21 +249,11 @@ kill_server --global  # Kill ALL tmux servers
 
 ```bash
 # Fresh LLM calls
-parallel_run --no-cache tests/contact_manager/test_ask.py
+parallel_run --no-cache tests/guidance_manager/test_skill_migration.py
 
 # Compare models (grid search)
 grid_search --env UNIFY_MODEL="gpt-4o|claude-3" tests/
 ```
-
-### Overwrite test scenarios
-
-Some test suites (ContactManager, TranscriptManager, etc.) use pre-seeded scenario data that persists between runs for speed. To delete and recreate these scenarios from scratch:
-
-```bash
-parallel_run --overwrite-scenarios tests/contact_manager
-```
-
-Use this when scenario seed data has changed (e.g., new contacts, updated transcript exchanges) and you need to regenerate the cached scenario state.
 
 ---
 

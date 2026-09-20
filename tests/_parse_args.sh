@@ -8,7 +8,7 @@
 #
 # After calling parse_test_args, these variables are populated:
 #   SERIAL, TIMEOUT, SESSION_TIMEOUT, NAME_PATTERN, EVAL_ONLY, SYMBOLIC_ONLY,
-#   DETERMINISTIC_ONLY, REPEAT_COUNT, OVERWRITE_SCENARIOS, MAX_JOBS,
+#   DETERMINISTIC_ONLY, REPEAT_COUNT, MAX_JOBS,
 #   ENV_OVERRIDES[], TAGS[], PYTEST_EXTRA_ARGS[], PYTEST_COLLECTION_ARGS[],
 #   POSITIONAL_ARGS[]
 #
@@ -38,7 +38,6 @@ parse_test_args() {
   SYMBOLIC_ONLY=0
   DETERMINISTIC_ONLY=0
   REPEAT_COUNT=1
-  OVERWRITE_SCENARIOS=0
   MAX_JOBS=$_PARSE_ARGS_NUM_CORES
   ENV_OVERRIDES=()
   TAGS=()
@@ -115,10 +114,6 @@ parse_test_args() {
           echo "Error: --repeat requires a positive integer argument (e.g., --repeat 5)." >&2
           return 2
         fi
-        ;;
-      --overwrite-scenarios)
-        OVERWRITE_SCENARIOS=1
-        shift
         ;;
       --tags)
         if [[ -n "${2-}" ]]; then
@@ -242,7 +237,6 @@ Options:
   --deterministic-only Run only tests with no model in the loop
   --repeat N           Run each test N times
   --tags TAG           Tag runs for filtering (repeatable)
-  --overwrite-scenarios  Delete and recreate test scenarios
   -h, --help           Show this help
   --                   Pass remaining args directly to pytest
 ${HELP_EXTRA_OPTIONS:-}
