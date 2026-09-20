@@ -125,10 +125,10 @@ def test_tool_names_fully_qualified():
 
 
 def test_primitive_row_filter():
-    """primitive_row_filter() builds a membership expression over primitive_class."""
+    """primitive_row_filter() builds a SQL membership clause over primitive_class."""
     registry = get_registry()
     filter_expr = registry.primitive_row_filter(PrimitiveScope.single("actor"))
-    assert filter_expr == f'primitive_class in ["{_ACTOR_CLASS_PATH}"]'
+    assert filter_expr == f"primitive_class IN ('{_ACTOR_CLASS_PATH}')"
 
 
 # ────────────────────────────────────────────────────────────────────────────
