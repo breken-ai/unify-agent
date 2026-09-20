@@ -25,6 +25,7 @@ cp .env.example .env        # add one LLM provider key
 - The runtime's home is `UNIFY_HOME` (default `~/.unify`): `store.sqlite`, `workspace/` (the actor's working directory, attachments and downloads) and `logs/`.
 - `unify --debug` streams runtime logs to the terminal as well as the log files; `unify --home DIR` uses another home.
 - The chat CLI lives in `unify/cli.py`. It publishes `UnifyMessageReceived` events on the in-memory event broker and renders the `UnifyMessageSent` replies, so it is one front end over the same loop any client can drive.
+- `unify act "request"` bypasses the conversation loop: one `CodeActActor` takes the request, progress streams to stderr from the handle's notification queue, a question the actor asks is answered from the terminal through `next_clarification`/`answer_clarification`, and the result goes to stdout (`--json` adds token accounting, `--persist` keeps the sandbox for follow-ups, `--no-store` skips the storage review). Use it for like-for-like comparisons with single-loop harnesses and for benchmark runners.
 
 ## Development environment
 

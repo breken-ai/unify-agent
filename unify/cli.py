@@ -1,10 +1,15 @@
-"""Terminal chat with the local assistant.
+"""The terminal front ends: chat with the assistant, or drive the actor alone.
 
 ``unify`` (or ``python -m unify``) starts the slow brain in-process, wires the
 terminal to the in-app chat, and renders what the assistant sends back.
 Every line typed is an inbound ``UnifyMessageReceived`` event; every reply is
 the ``UnifyMessageSent`` event the brain publishes, so the terminal is one
 front end over the same loop any other client would drive.
+
+``unify act "request"`` bypasses the conversation loop: one ``CodeActActor``
+takes the request, its progress streams to the terminal, any question it asks
+is answered from the terminal, and the result is printed. This is the unit to
+compare against single-loop harnesses, and the shape a benchmark runner wants.
 
 Runtime logs go to ``<UNIFY_HOME>/logs`` and stay off the terminal unless
 ``--debug`` is given.
@@ -37,11 +42,18 @@ asked for while you keep typing; follow-up messages steer it.
 """
 
 
-def _parse_args(argv: list[str] | None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        prog="unify",
-        description="Chat with the local assistant.",
-    )
+ACT_HELP = """\
+Drive one actor directly, without the conversation loop.
+
+The request is taken from the command line, or from stdin when omitted or
+given as "-". Progress lines stream to stderr while the actor works; the
+result goes to stdout. When the actor asks a question, type the answer and
+press Enter. With --persist the actor stays alive after answering: each
+further line is a follow-up in the same sandbox, /quit ends the session.
+"""
+
+
+def _add_common_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--home",
         metavar="DIR",
@@ -53,7 +65,72 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         action="store_true",
         help="stream runtime logs to the terminal as well as the log files",
     )
-    return parser.parse_args(argv)
+
+
+def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="unify",
+        description="Chat with the local assistant, or drive its actor directly.",
+    )
+    _add_common_options(parser)
+    commands = parser.add_subparsers(dest="command")
+
+    chat = commands.add_parser("chat", help="chat with the assistant (the default)")
+    _add_common_options(chat)
+
+    act = commands.add_parser(
+        "act",
+        help="run one request through the actor, bypassing the conversation loop",
+        description=ACT_HELP,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    _add_common_options(act)
+    act.add_argument(
+        "request",
+        nargs="?",
+        help='the request; "-" or omitted reads stdin',
+    )
+    act.add_argument(
+        "--persist",
+        action="store_true",
+        help="keep the actor alive after the result; further lines are follow-ups",
+    )
+    act.add_argument(
+        "--no-store",
+        action="store_true",
+        help="skip the storage review that distils the run into functions and guidance",
+    )
+    act.add_argument(
+        "--no-compose",
+        action="store_true",
+        help="forbid execute_code: the actor may only call stored functions",
+    )
+    act.add_argument(
+        "--no-clarify",
+        action="store_true",
+        help="disable request_clarification; the actor must decide on its own",
+    )
+    act.add_argument(
+        "--timeout",
+        type=float,
+        metavar="SECONDS",
+        help="give up on the request after this long",
+    )
+    act.add_argument(
+        "--json",
+        action="store_true",
+        help="print the result as a JSON object with the run statistics",
+    )
+    act.add_argument(
+        "--quiet",
+        action="store_true",
+        help="do not stream progress lines",
+    )
+
+    args = parser.parse_args(argv)
+    if args.command is None:
+        args.command = "chat"
+    return args
 
 
 def _configure_environment(args: argparse.Namespace) -> Path:
@@ -243,7 +320,188 @@ class Chat:
         return False
 
 
-async def _run(args: argparse.Namespace) -> int:
+class Act:
+    """One actor driven from the terminal, with no conversation loop above it."""
+
+    def __init__(self, args: argparse.Namespace) -> None:
+        self._args = args
+        self._actor = None
+        self._handle = None
+        self._pending_clarifications: asyncio.Queue[dict] = asyncio.Queue()
+        self._closing = asyncio.Event()
+
+    # ── lifecycle ────────────────────────────────────────────────────────
+
+    async def start(self) -> None:
+        import unify
+        from unify.actor.environments import ActorEnvironment
+        from unify.manager_registry import ManagerRegistry
+        from unify.session_details import SESSION_DETAILS
+        from unify.workspace import get_local_root
+
+        SESSION_DETAILS.populate_from_env()
+        unify.init()
+        # Relative paths in the actor's code resolve against the workspace,
+        # exactly as they do under the conversation loop.
+        local_root = Path(get_local_root())
+        local_root.mkdir(parents=True, exist_ok=True)
+        os.chdir(local_root)
+        self._actor = ManagerRegistry.get_actor(
+            description="direct actor session",
+            environments=[ActorEnvironment()],
+        )
+
+    async def close(self) -> None:
+        self._closing.set()
+        if self._handle is not None and not self._handle.done():
+            try:
+                await self._handle.stop("session closed")
+            except Exception:
+                pass
+        if self._actor is not None:
+            try:
+                await self._actor.close()
+            except Exception:
+                pass
+
+    # ── output ───────────────────────────────────────────────────────────
+
+    def _progress(self, text: str) -> None:
+        if not self._args.quiet:
+            print(f"  · {text}", file=sys.stderr, flush=True)
+
+    async def _watch_notifications(self) -> None:
+        while not self._closing.is_set():
+            notif = await self._handle.next_notification()
+            if not isinstance(notif, dict):
+                self._progress(str(notif))
+                continue
+            kind = notif.get("type", "")
+            if kind == "response":
+                # A persist-mode turn finished; its answer is the result of the
+                # follow-up the user typed.
+                print(f"\n{notif.get('content', '')}\n", flush=True)
+            elif kind in ("storage_review_complete", "turn_storage_review_complete"):
+                verdict = "stored" if notif.get("success") else "storage review failed"
+                self._progress(f"{verdict}: {notif.get('message', '')}")
+            else:
+                text = notif.get("message") or notif.get("result_summary") or kind
+                self._progress(str(text))
+
+    async def _watch_clarifications(self) -> None:
+        while not self._closing.is_set():
+            clar = await self._handle.next_clarification()
+            if not clar:
+                continue
+            print(f"\nactor asks> {clar.get('question', '')}", flush=True)
+            await self._pending_clarifications.put(clar)
+
+    # ── input ────────────────────────────────────────────────────────────
+
+    async def _read_lines(self) -> None:
+        """Route typed lines: answer a pending question, else steer the actor."""
+        loop = asyncio.get_running_loop()
+        reader = asyncio.StreamReader()
+        await loop.connect_read_pipe(
+            lambda: asyncio.StreamReaderProtocol(reader),
+            sys.stdin,
+        )
+        while not self._closing.is_set():
+            raw = await reader.readline()
+            if not raw:
+                if self._args.persist:
+                    await self._handle.stop("session closed")
+                return
+            line = raw.decode(errors="replace").strip()
+            if not line:
+                continue
+            if line in {"/quit", "/exit", "/q"}:
+                await self._handle.stop("session closed")
+                return
+            if not self._pending_clarifications.empty():
+                clar = await self._pending_clarifications.get()
+                await self._handle.answer_clarification(
+                    str(clar.get("call_id") or ""),
+                    line,
+                )
+                continue
+            await self._handle.interject(line)
+
+    # ── run ──────────────────────────────────────────────────────────────
+
+    async def run(self, request: str) -> int:
+        await self.start()
+        args = self._args
+        interactive = sys.stdin.isatty()
+        clarify = not args.no_clarify and interactive
+        if not args.no_clarify and not interactive:
+            self._progress("stdin is not a terminal; the actor cannot ask questions")
+        self._handle = await self._actor.act(
+            request,
+            persist=args.persist,
+            can_compose=not args.no_compose,
+            can_store=not args.no_store,
+            clarification_enabled=clarify,
+        )
+        watchers = [
+            asyncio.create_task(self._watch_notifications()),
+            asyncio.create_task(self._watch_clarifications()),
+        ]
+        reader = None
+        if interactive and (clarify or args.persist):
+            reader = asyncio.create_task(self._read_lines())
+        try:
+            result = await asyncio.wait_for(self._handle.result(), timeout=args.timeout)
+        except asyncio.TimeoutError:
+            print(f"timed out after {args.timeout:g}s", file=sys.stderr, flush=True)
+            return 1
+        except Exception as exc:
+            print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+            return 1
+        finally:
+            if reader is not None and not args.persist:
+                reader.cancel()
+
+        self._print_result(result)
+
+        if args.persist:
+            self._progress("actor is waiting; type a follow-up, /quit to end")
+            if reader is not None:
+                await reader
+        while not self._handle.done():
+            await asyncio.sleep(0.2)
+        for task in watchers:
+            task.cancel()
+        return 0
+
+    def _print_result(self, result: object) -> None:
+        if self._args.json:
+            import json
+
+            payload = {
+                "result": (
+                    result if isinstance(result, (str, dict, list)) else str(result)
+                ),
+                # The storage-aware handle meters tokens; a bare loop handle does not.
+                "run_stats": getattr(self._handle, "run_stats", {}) or {},
+            }
+            print(json.dumps(payload, indent=2, default=str), flush=True)
+        else:
+            print(result, flush=True)
+
+
+def _read_request(args: argparse.Namespace) -> str:
+    if args.request and args.request != "-":
+        return args.request
+    text = sys.stdin.read().strip()
+    if not text:
+        raise SystemExit(
+            "unify act: no request given (pass it as an argument or on stdin)",
+        )
+    return text
+
+
+async def _run_chat(args: argparse.Namespace) -> int:
     chat = Chat()
     try:
         await chat.run()
@@ -252,11 +510,20 @@ async def _run(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _run_act(args: argparse.Namespace) -> int:
+    session = Act(args)
+    try:
+        return await session.run(_read_request(args))
+    finally:
+        await session.close()
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     _configure_environment(args)
+    runner = _run_act if args.command == "act" else _run_chat
     try:
-        return asyncio.run(_run(args))
+        return asyncio.run(runner(args))
     except KeyboardInterrupt:
         return 130
 
