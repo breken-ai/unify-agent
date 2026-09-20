@@ -57,6 +57,14 @@ Then start chatting:
 > Run it against ~/exports/run-42.csv and plot the deltas.
 ```
 
+To measure the actor on its own, without the conversation loop above it, hand it one request directly:
+
+```bash
+.venv/bin/python -m unify act "Count the rows in ~/exports/run-42.csv"
+```
+
+Progress streams to stderr and the result to stdout, so it slots into a benchmark runner. The request can come from stdin, `--json` adds the token accounting, `--no-store` skips the storage review, `--persist` keeps the sandbox alive for follow-up lines, and a question the actor asks is answered by typing at the terminal. This is the like-for-like unit against single-loop harnesses such as Prime Agent; the conversation loop is what unify adds on top.
+
 Everything the assistant keeps lives under `~/.unify/` (`UNIFY_HOME`): the SQLite store, the workspace environment, the `workspace/` directory the actor reads and writes files in, and the runtime logs. Delete the directory and you have a fresh assistant. `/help` inside the chat lists the few slash commands (attach a file, quit); `unify --debug` streams the runtime logs to the terminal.
 
 <details>
