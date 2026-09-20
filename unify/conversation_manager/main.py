@@ -19,14 +19,12 @@ from unify.conversation_manager.in_memory_event_broker import InMemoryEventBroke
 
 async def run_conversation_manager(
     *,
-    project_name: str = "Assistants",
     event_broker: InMemoryEventBroker | None = None,
     stop_event: asyncio.Event | None = None,
 ) -> ConversationManager:
     """Start a ConversationManager and its background tasks; return it running.
 
     Args:
-        project_name: Project name for logging
         event_broker: The broker to listen on. Defaults to the process singleton.
         stop_event: Set it to shut the manager down. Defaults to a fresh event.
 
@@ -50,7 +48,7 @@ async def run_conversation_manager(
     if stop_event is None:
         stop_event = asyncio.Event()
 
-    cm = ConversationManager(event_broker, stop_event, project_name=project_name)
+    cm = ConversationManager(event_broker, stop_event)
 
     asyncio.create_task(cm.wait_for_events()).add_done_callback(log_task_exc)
     asyncio.create_task(managers_utils.init_conv_manager(cm))

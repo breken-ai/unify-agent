@@ -35,13 +35,6 @@ PLACEHOLDER_ASSISTANT_FIRST_NAME = "Unify"
 PLACEHOLDER_USER_FIRST_NAME = "Default"
 PLACEHOLDER_USER_SURNAME = "User"
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Context Path Defaults (for the store's context hierarchy)
-# Format: {user_id}/{agent_id}/... e.g., "default/0/Functions"
-# ─────────────────────────────────────────────────────────────────────────────
-UNASSIGNED_USER_CONTEXT = UNASSIGNED_USER_ID
-UNASSIGNED_ASSISTANT_CONTEXT = "0"
-
 
 def _runtime_str(value: object) -> str:
     """Normalize nullable runtime values to env-safe strings."""
@@ -102,18 +95,6 @@ class SessionDetails:
     user: UserDetails = field(default_factory=UserDetails)
 
     _initialized: bool = field(default=False, repr=False)
-
-    @property
-    def assistant_context(self) -> str:
-        """The assistant's agent_id as the context path component."""
-        if self.assistant.agent_id is not None:
-            return str(self.assistant.agent_id)
-        return UNASSIGNED_ASSISTANT_CONTEXT
-
-    @property
-    def user_context(self) -> str:
-        """The user's ID used as the context path component."""
-        return self.user.id or UNASSIGNED_USER_CONTEXT
 
     @property
     def is_initialized(self) -> bool:

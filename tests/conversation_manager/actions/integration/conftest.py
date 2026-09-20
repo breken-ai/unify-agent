@@ -131,63 +131,21 @@ async def conversation_manager_codeact(
     test's CodeActActor handle. Module-scoped async fixtures run on a different
     loop under pytest-asyncio strict mode, which can prevent ActorResult propagation.
 
-    The runtime honours the per-test context as its session root only in test
-    mode, so ``SETTINGS.TEST`` is pinned on for the fixture's lifetime; without
-    it the managers bind to the default assistant root while the test body
-    reads from its own re-rooted context.
     """
-    from unify import db
-    from unify import settings as unify_settings
-    from tests.settings import SETTINGS
-
-    monkeypatch.setattr(unify_settings.SETTINGS, "TEST", True)
     from unify.conversation_manager.event_broker import reset_event_broker
     from unify.conversation_manager import start_async, stop_async
     from unify.conversation_manager.domains import managers_utils
     from unify.common.prompt_helpers import now as prompt_now
 
-    test_ctx = getattr(request.node, "_unity_unify_test_ctx", None)
-    assert (
-        test_ctx
-    ), "Integration tests require the per-test Unify context from conftest"
-
-    db.activate(SETTINGS.test_project_name, overwrite=False)
-    db.set_context(test_ctx, relative=False, skip_create=False)
-
     reset_event_broker()
 
-    from unify.common.context_registry import ContextRegistry
-    from unify.common.runtime_context import bind_runtime_context_root
-
-    bind_runtime_context_root(strict=True)
-
-    original_init_managers = managers_utils._init_managers
-
-    def _init_managers_with_test_context(cm, loop, actor=None):
-        db.activate(SETTINGS.test_project_name, overwrite=False)
-        db.set_context(test_ctx, relative=False, skip_create=True)
-        bind_runtime_context_root(strict=True)
-        ContextRegistry.set_base_context(test_ctx)
-        return original_init_managers(cm, loop, actor)
-
-    managers_utils._init_managers = _init_managers_with_test_context
-
-    cm = await start_async(project_name="TestProject")
+    cm = await start_async()
 
     # Initialize managers once. Actor created here is a placeholder; tests override per-test.
-    try:
-        cm.initialized = False
-        with scenario_file_lock("cm_integration_codeact"):
-            bind_runtime_context_root(strict=True)
-            await managers_utils.init_conv_manager(cm)
-        await managers_utils.wait_for_initialization(cm)
-
-        db.activate(SETTINGS.test_project_name, overwrite=False)
-        db.set_context(test_ctx, relative=False, skip_create=True)
-        bind_runtime_context_root(strict=True)
-        ContextRegistry.set_base_context(test_ctx)
-    finally:
-        managers_utils._init_managers = original_init_managers
+    cm.initialized = False
+    with scenario_file_lock("cm_integration_codeact"):
+        await managers_utils.init_conv_manager(cm)
+    await managers_utils.wait_for_initialization(cm)
 
     # Reset last_snapshot to the (possibly patched) prompt_now time.
     cm.last_snapshot = prompt_now(as_string=False)

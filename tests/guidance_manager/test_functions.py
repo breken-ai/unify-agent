@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-
+from unify import db
 from tests.helpers import _handle_project
 from unify.function_manager.function_manager import FunctionManager
 from unify.guidance_manager.guidance_manager import GuidanceManager
 
 
 @_handle_project
-def test_function_ids_roundtrip_and_fetch():
-    # Seed two functions
+def test_function_ids_roundtrip_and_inverse_link():
     src_a = (
         "def alpha(a: int) -> int:\n"
         '    """Return value + 1"""\n'
@@ -22,8 +21,8 @@ def test_function_ids_roundtrip_and_fetch():
     listing = fm.list_functions()
     alpha_id = listing["alpha"]["function_id"]
     beta_id = listing["beta"]["function_id"]
+    assert listing["alpha"]["guidance_ids"] == []
 
-    # Create guidance that references both functions
     gm = GuidanceManager()
     out = gm.add_guidance(
         title="Math Ops",
@@ -32,30 +31,27 @@ def test_function_ids_roundtrip_and_fetch():
     )
     gid = out["details"]["guidance_id"]
 
-    # Roundtrip: row stores function_ids
-    rows = gm.filter(filter=f"guidance_id == {gid}", limit=1)
+    # Roundtrip: the row stores function_ids.
+    rows = gm.filter(filter=f"guidance_id = {gid}", limit=1)
     assert rows and rows[0].function_ids == [alpha_id, beta_id]
+    assert rows[0].stale_reasons == []
 
-    # Fetch related functions (without implementations)
-    funcs = gm._get_functions_for_guidance(
-        guidance_id=gid,
-        include_implementations=False,
-    )
-    names = {f["name"] for f in funcs}
-    assert names == {"alpha", "beta"}
-    assert all("implementation" not in f for f in funcs)
+    # Functions report the guidance citing them, derived from function_ids.
+    listing = fm.list_functions()
+    assert listing["alpha"]["guidance_ids"] == [gid]
+    assert listing["beta"]["guidance_ids"] == [gid]
 
-    # Fetch related functions (with implementations)
-    funcs_with_impl = gm._get_functions_for_guidance(
-        guidance_id=gid,
-        include_implementations=True,
+    # The JSON list column is addressable from SQL.
+    cited = db.query(
+        "SELECT guidance_id FROM guidance"
+        " WHERE EXISTS (SELECT 1 FROM json_each(function_ids) WHERE value = ?)",
+        (alpha_id,),
     )
-    assert any("implementation" in f for f in funcs_with_impl)
+    assert [row["guidance_id"] for row in cited] == [gid]
 
 
 @_handle_project
-def test_attach_functions_limit_and_update():
-    # Seed two functions
+def test_update_function_ids():
     src_x = "def inc(x: int) -> int:\n" '    """Increment"""\n' "    return x + 1\n"
     src_y = "def dbl(y: int) -> int:\n" '    """Double"""\n' "    return y * 2\n"
     fm = FunctionManager()
@@ -65,34 +61,45 @@ def test_attach_functions_limit_and_update():
     dbl_id = listing["dbl"]["function_id"]
 
     gm = GuidanceManager()
-    out = gm.add_guidance(
+    gid = gm.add_guidance(
         title="Calculations",
         content="Useful operations for math.",
         function_ids=[inc_id, dbl_id],
-    )
-    gid = out["details"]["guidance_id"]
+    )["details"]["guidance_id"]
 
-    # Attach with a limit
-    payload = gm._attach_functions_for_guidance_to_context(
-        guidance_id=gid,
-        include_implementations=False,
-        limit=1,
-    )
-    assert isinstance(payload, dict)
-    assert payload.get("attached_count") == 1
-    assert isinstance(payload.get("functions"), list) and len(payload["functions"]) == 1
-
-    # Update to a single function id
     gm.update_guidance(guidance_id=gid, function_ids=[inc_id])
-    rows = gm.filter(filter=f"guidance_id == {gid}", limit=1)
+    rows = gm.filter(filter=f"guidance_id = {gid}", limit=1)
     assert rows and rows[0].function_ids == [inc_id]
 
-    funcs_after = gm._get_functions_for_guidance(guidance_id=gid)
-    assert len(funcs_after) == 1 and funcs_after[0]["function_id"] == inc_id
+    listing = fm.list_functions()
+    assert listing["inc"]["guidance_ids"] == [gid]
+    assert listing["dbl"]["guidance_ids"] == []
 
 
 @_handle_project
-def test_columns_include_function_ids():
+def test_update_to_missing_function_records_stale_reason():
+    fm = FunctionManager()
+    fm.add_functions(
+        implementations="def keep(x: int) -> int:\n"
+        '    """Keep"""\n'
+        "    return x\n",
+    )
+    keep_id = fm.list_functions()["keep"]["function_id"]
+
     gm = GuidanceManager()
-    cols = gm._list_columns()
-    assert "function_ids" in cols
+    gid = gm.add_guidance(title="Links", content="Cites functions.")["details"][
+        "guidance_id"
+    ]
+
+    gm.update_guidance(guidance_id=gid, function_ids=[keep_id, 424242])
+    (row,) = gm.filter(filter=f"guidance_id = {gid}", limit=1)
+    assert row.function_ids == [keep_id, 424242]
+    (reason,) = row.stale_reasons
+    assert reason.dep_kind == "function"
+    assert reason.id == 424242
+
+    # reconcile_dependencies re-derives the same debt without duplicating it.
+    outcome = gm.reconcile_dependencies()
+    assert outcome["details"]["stale_guidance_ids"] == [gid]
+    (row,) = gm.filter(filter=f"guidance_id = {gid}", limit=1)
+    assert [r.id for r in row.stale_reasons] == [424242]

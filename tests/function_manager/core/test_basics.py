@@ -247,9 +247,10 @@ def test_list_with_and_without_implementations():
 def test_delete_single():
     fm = _FM()
     fm.add_functions(implementations="def alpha():\n    return 1\n")
-    assert len(fm.list_functions()) == 1
+    listing = fm.list_functions()
+    assert len(listing) == 1
 
-    fm.delete_function(function_id=0)
+    fm.delete_function(function_id=listing["alpha"]["function_id"])
     assert fm.list_functions() == {}
 
 
@@ -262,7 +263,8 @@ def test_delete_with_dependants_cascades():
     fm.add_functions(implementations=[add_src, twin_src])
 
     # delete `add`; since no dependants are allowed, only `add` is removed
-    fm.delete_function(function_id=0, delete_dependents=True)
+    add_id = fm.list_functions()["add"]["function_id"]
+    fm.delete_function(function_id=add_id, delete_dependents=True)
     remaining = fm.list_functions()
     assert remaining.keys() == {"twin"}
 
@@ -274,7 +276,8 @@ def test_delete_without_cascading_leaves_dependants():
     fm = _FM()
     fm.add_functions(implementations=[add_src, twin_src])
 
-    fm.delete_function(function_id=0, delete_dependents=False)
+    add_id = fm.list_functions()["add"]["function_id"]
+    fm.delete_function(function_id=add_id, delete_dependents=False)
     remaining = fm.list_functions()
     assert remaining.keys() == {"twin"}
 
@@ -431,8 +434,11 @@ def test_batch_delete_nonexistent():
     # Try to delete functions that don't exist
     result = fm.delete_function(function_id=[9999, 8888])
 
-    # Should return empty since no functions matched
-    assert result == {}
+    # Each unknown id is reported as already gone; nothing is raised
+    assert result == {
+        "function_9999": "already_deleted",
+        "function_8888": "already_deleted",
+    }
 
     # Original function should still exist
     assert "alpha" in fm.list_functions()
@@ -456,12 +462,12 @@ def test_search_filtering_across_columns():
     fm.add_functions(implementations=[price_src, square_src, use_src])
 
     # filter on docstring contents
-    hits = fm.filter_functions(filter="'price' in docstring")
+    hits = fm.filter_functions(filter="docstring LIKE '%price%'")
     names = {h["name"] for h in hits}
     assert names == {"price_total"}
 
-    # filter by Python predicate on the `name` column
-    hits = fm.filter_functions(filter="name[0:2] == 'sq'")
+    # filter by a SQL expression over the `name` column
+    hits = fm.filter_functions(filter="substr(name, 1, 2) = 'sq'")
     assert {h["name"] for h in hits} == {"square"}
 
 
@@ -472,12 +478,12 @@ def test_filter_functions_include_implementations():
     fm.add_functions(implementations="def foo(x):\n    return x * 2\n")
 
     # Default (True): includes implementation
-    hits = fm.filter_functions(filter="name == 'foo'")
+    hits = fm.filter_functions(filter="name = 'foo'")
     assert len(hits) == 1
     assert "implementation" in hits[0]
 
     # Explicit False: excludes implementation
-    hits = fm.filter_functions(filter="name == 'foo'", include_implementations=False)
+    hits = fm.filter_functions(filter="name = 'foo'", include_implementations=False)
     assert len(hits) == 1
     assert "implementation" not in hits[0]
     assert "name" in hits[0]  # Other fields still present
@@ -525,8 +531,9 @@ def test_clear():
 
     listing = fm.list_functions()
     assert set(listing.keys()) == {"alpha", "beta"}
-    ids = {listing["alpha"]["function_id"], listing["beta"]["function_id"]}
-    assert all(isinstance(x, int) for x in ids)
+    first_id = listing["alpha"]["function_id"]
+    assert isinstance(first_id, int)
+    assert isinstance(listing["beta"]["function_id"], int)
 
     # Execute clear
     fm.clear()
@@ -534,14 +541,15 @@ def test_clear():
     # After clear: no functions should remain
     assert fm.list_functions() == {}
 
-    # New additions should work against a clean slate (ids reset)
+    # New additions work against a clean slate: the manager is in the state
+    # of a brand-new instance, so ids restart where the first one started.
     fm.add_functions(implementations="def gamma():\n    return 3\n")
     post = fm.list_functions()
     assert set(post.keys()) == {"gamma"}
-    assert post["gamma"]["function_id"] == 0
+    assert post["gamma"]["function_id"] == first_id
 
     fm.add_functions(implementations="def square(x):\n    return x * x\n")
-    hits = fm.filter_functions(filter="'return x * x' in implementation")
+    hits = fm.filter_functions(filter="implementation LIKE '%return x * x%'")
     assert {h["name"] for h in hits} == {"square"}
 
 

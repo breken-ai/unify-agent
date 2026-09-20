@@ -13,7 +13,6 @@ import pytest
 
 from tests.helpers import _handle_project
 from unify.function_manager.function_manager import FunctionManager
-from unify.common.context_registry import ContextRegistry
 
 # ────────────────────────────────────────────────────────────────────────────
 # Sample Functions
@@ -98,7 +97,6 @@ def function_manager_factory():
     managers = []
 
     def _create():
-        ContextRegistry.forget(FunctionManager, "Functions/Compositional")
         fm = FunctionManager()
         managers.append(fm)
         return fm

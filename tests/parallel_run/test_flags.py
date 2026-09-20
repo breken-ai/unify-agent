@@ -10,7 +10,6 @@ Tests each flag in isolation:
 - --eval-only
 - --symbolic-only
 - --repeat
-- --tags
 - --help / -h
 - -- (pytest passthrough)
 """
@@ -489,40 +488,6 @@ class TestRepeatFlag:
         assert result.exit_code != 0
 
 
-class TestTagsFlag:
-    """Tests for --tags flag."""
-
-    def test_tags_accepted(self, runner):
-        """--tags should be accepted without error."""
-        result = runner.run(
-            "--tags",
-            "test-tag",
-            runner.fixture_path("test_always_pass.py"),
-            wait_for_completion=True,
-        )
-
-        assert result.exit_code == 0
-
-    def test_tags_multiple(self, runner):
-        """--tags with comma-separated values should work."""
-        result = runner.run(
-            "--tags",
-            "tag1,tag2,tag3",
-            runner.fixture_path("test_always_pass.py"),
-            wait_for_completion=True,
-        )
-
-        assert result.exit_code == 0
-
-    def test_tags_requires_value(self, runner):
-        """--tags without a value should error."""
-        result = runner.run(
-            "--tags",
-        )
-
-        assert result.exit_code != 0 or "Error" in result.stderr
-
-
 class TestJobsFlag:
     """Tests for --jobs / -j flag (concurrency limiting)."""
 
@@ -615,7 +580,6 @@ class TestHelpFlag:
         assert "--eval-only" in result.stdout
         assert "--symbolic-only" in result.stdout
         assert "--repeat" in result.stdout
-        assert "--tags" in result.stdout
 
     def test_help_short_flag(self, runner):
         """-h should work same as --help."""

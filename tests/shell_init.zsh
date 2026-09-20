@@ -98,7 +98,6 @@ _unity_parallel_run_complete() {
         '-e[Set environment variable]:var:' \
         '--env[Set environment variable]:var:' \
         '--no-cache[Call the LLM provider for every request]' \
-        '--tags[Add test tags]:tags:' \
         '--eval-only[Run only eval tests]' \
         '--symbolic-only[Run only symbolic tests]' \
         '--deterministic-only[Run only tests with no model in the loop]' \

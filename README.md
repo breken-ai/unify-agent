@@ -126,7 +126,7 @@ You ──► ConversationManager (slow brain: event-driven, single-shot tool de
         Skill libraries (stored functions + procedures, discovered before writing code)
             │
             ▼
-        unify.db (in-process SQLite store: contexts, rows, derived columns)
+        unify.db (one SQLite file: functions, primitives, guidance, builtin_guidance, messages)
 ```
 
 **Dispatch flows down; steering flows back up the same path.** Every level returns the same `SteerableToolHandle`, so a mid-flight redirect doesn't abort the run, doesn't append a second prompt, and doesn't wait for the next tool boundary. It propagates through the live nested call stack as a typed signal any inner loop can act on.
@@ -167,9 +167,9 @@ Search is a plain word match over names, docstrings, titles and content: the lib
 
 ### The local store
 
-`unify.db` is an in-process SQLite engine with the shape of a document store: **projects** hold **contexts** (tables), contexts hold **rows** of JSON with typed **fields**, and a context can declare unique keys, auto-counted ids, foreign keys and **derived columns** whose equations are evaluated on write. Filters and sort keys are ordinary Python expressions evaluated per row (`age > 30 and 'berlin' in city.lower()`).
+`unify.db` is one SQLite file with five tables: `functions`, `primitives`, `guidance`, `builtin_guidance` and `messages`. The `primitives` table is seeded from the primitive registry. The `builtin_guidance` table is seeded from the committed Agent Skills snapshot. Two views, `all_functions` (`is_primitive`) and `all_guidance` (`is_builtin`), read each seeded catalogue alongside the assistant's own rows. Managers write plain SQL. Filters the model writes are SQL `WHERE` clauses (`docstring LIKE '%csv%' AND is_primitive = 0`) run through a read-only authorizer, so a clause can only read.
 
-Chat history, functions and procedures all go through this one API, so the whole assistant is one file you can back up, inspect or delete.
+Chat history, functions and procedures all live in this one file, so the whole assistant is something you can back up, inspect with `sqlite3` or delete.
 
 For the full breakdown (async tool loop internals, event bus, primitive registry, context propagation) see [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
@@ -209,7 +209,7 @@ See [tests/README.md](tests/README.md) for the philosophy and the runner.
 | `unify/function_manager/steering.py` | Steering code that is already running |
 | `unify/conversation_manager/conversation_manager.py` | The slow brain: debouncing, in-flight actions, event loop |
 | `unify/conversation_manager/domains/brain_action_tools.py` | How the brain starts, steers and tracks concurrent work |
-| `unify/db/engine.py` | The local store: contexts, rows, derived columns, commits |
+| `unify/db.py` | The local store: the five tables, the two views, the read-only path for model-written SQL |
 | `unify/environment.py` | The workspace environment: one venv, packages installed once |
 
 ## Project structure
@@ -218,7 +218,7 @@ See [tests/README.md](tests/README.md) for the philosophy and the runner.
 unify/
 ├── unify/             # The harness: cli, actor, conversation_manager, function_manager, guidance_manager, db, common
 ├── tests/             # Pytest suite (cached LLM responses, per-session SQLite store)
-├── scripts/           # Skill import, builtins seeding, git hooks
+├── scripts/           # Skill import, git hooks
 └── docs/              # Design writeups
 ```
 

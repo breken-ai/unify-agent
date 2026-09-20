@@ -7,19 +7,20 @@ The `FunctionManager` maintains a catalogue of executable Python functions, spli
 
 ## Architecture
 
-### Two Separate Contexts
+### Two Tables, One View
 
-Functions are stored in two dedicated Unify contexts to ensure stable IDs:
+The two categories live in two tables of the store (`unify/db.py`), read together through one view:
 
-| Context | Purpose | ID Assignment |
-|---------|---------|---------------|
-| `Functions/Primitives` | System primitives | Explicit stable IDs (code-defined) |
-| `Functions/Compositional` | User-specific functions | Auto-incrementing (store-managed) |
+| Table | Purpose | ID Assignment |
+|-------|---------|---------------|
+| `primitives` | System primitives | Explicit stable IDs (hashed from the code) |
+| `functions` | User-specific functions | Auto-incrementing |
+| `all_functions` (view) | Both populations, with `is_primitive` set to 1 or 0 | |
 
 This separation guarantees:
-- Primitive IDs are consistent across all users
+- Primitive IDs are consistent across every store
 - Compositional function IDs are never affected by primitive changes
-- No ID collisions between the two namespaces
+- No ID collisions between the two tables
 
 ### Primitive ID Stability
 
@@ -55,13 +56,13 @@ Guidance is **not** a primitive. It is a typed catalogue exposed as top-level Ac
 
 ## Primitive Catalogue Seeding
 
-Primitive rows live in a read-only builtins catalogue (`unify/function_manager/builtins_catalog.py`) that every `FunctionManager` reads through at query time:
+The `primitives` table is made equal to the primitive registry when a `FunctionManager` is constructed, once per process per store: every row is deleted and re-inserted with its stable ID in one transaction. Reads go through the `all_functions` view, so primitives and stored functions answer to the same SQL. `db.clear()` leaves the table alone.
 
-1. Seeding compares a hash of each namespace's primitive signatures/docstrings against the hash stored in the catalogue's `Functions/Meta` row
-2. Namespaces whose hash changed are deleted and re-inserted with their stable IDs
-3. Reads federate the catalogue with the manager's own rows, scoped by `primitive_row_filter`
+---
 
-This keeps primitives in sync with the codebase while avoiding unnecessary store writes.
+## Filtering
+
+`filter_functions(filter=...)` takes a SQL `WHERE` clause (without the keyword) over the `all_functions` columns, for example `name LIKE 'get_%'` or `docstring LIKE '%csv%' AND is_primitive = 0`. JSON list columns such as `depends_on` are queried with `EXISTS (SELECT 1 FROM json_each(depends_on) WHERE value = 'helper')`. The clause is combined with the manager's `filter_scope` and runs read-only; a clause SQLite rejects comes back as an `invalid_filter` tool error listing the columns it may use.
 
 ---
 

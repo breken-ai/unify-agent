@@ -5,8 +5,8 @@ import concurrent.futures
 from datetime import datetime, timezone
 import inspect
 import functools
-import json
 import logging
+import sqlite3
 import threading
 
 from secrets import token_hex
@@ -19,18 +19,13 @@ from typing import (
     Literal,
     Optional,
     Set,
+    Sequence,
     Tuple,
     Union,
 )
 from unify import db
-from unify.db import StoreError as _UnifyRequestError
-from ..common.log_utils import create_logs
-from ..common.federated_search import (
-    SCORE_FIELD,
-    FederatedSearchContext,
-    federated_filter,
-    federated_text_search,
-)
+from ..common.sql_filters import and_clauses, invalid_filter_error, not_in, or_clauses
+from ..common.text_search import SIMILARITY_FIELD, rank_by_text
 from .activation import (
     ActivationSettings,
     activation,
@@ -38,9 +33,6 @@ from .activation import (
     merged_usage,
     rank_score,
 )
-from ..common.builtins import builtins_project
-from .builtins_catalog import BUILTINS_PRIMITIVES_CONTEXT
-from ..common.tool_outcome import ToolErrorException
 from .execution_env import ENVIRONMENT_MODULES, create_base_globals
 from .steering import (
     DEFAULT_TOOL_NAMESPACES,
@@ -61,9 +53,6 @@ from .dependency_analysis import (
 from .types.function import Function
 from .source_labels import compile_function_source
 from .base import BaseFunctionManager
-from ..common.model_to_fields import model_to_fields
-from ..common.filter_utils import normalize_filter_expr
-from ..common.context_registry import ContextRegistry, TableContext
 from ..common.stale_reason import (
     StaleReason,
     coerce_stale_reasons,
@@ -77,7 +66,83 @@ from unify.function_manager.primitives.registry import get_registry
 
 logger = logging.getLogger(__name__)
 
-FUNCTIONS_COMPOSITIONAL_TABLE = "Functions/Compositional"
+_FUNCTION_SELECT = f"SELECT {', '.join(db.FUNCTION_COLUMNS)} FROM all_functions"
+
+_PRIMITIVES_SEEDED_FOR: set[str] = set()
+
+
+def _seed_primitives() -> None:
+    """Make the ``primitives`` table equal to the registry, once per store."""
+    path = db.store_path()
+    if path in _PRIMITIVES_SEEDED_FOR:
+        return
+    rows = get_registry().collect_primitives().values()
+    with db.transaction() as conn:
+        conn.execute("DELETE FROM primitives")
+        conn.executemany(
+            "INSERT INTO primitives (function_id, name, argspec, docstring,"
+            " primitive_class, primitive_method, metadata) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    int(row["function_id"]),
+                    row["name"],
+                    row.get("argspec") or "",
+                    row.get("docstring") or "",
+                    row["primitive_class"],
+                    row["primitive_method"],
+                    db.dumps(row.get("metadata") or {}),
+                )
+                for row in rows
+            ],
+        )
+    _PRIMITIVES_SEEDED_FOR.add(path)
+
+
+def _decode_function_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    db.decode(row, db.FUNCTION_JSON_COLUMNS)
+    row["is_primitive"] = bool(row.get("is_primitive"))
+    for column in (
+        "depends_on",
+        "stale_reasons",
+        "dependencies",
+        "third_party_imports",
+        "usage_recent_calls",
+    ):
+        if row.get(column) is None:
+            row[column] = []
+    if row.get("metadata") is None:
+        row["metadata"] = {}
+    return row
+
+
+def _attach_guidance_ids(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Add ``guidance_ids`` (the guidance entries citing each function) to rows."""
+    linked: Dict[int, List[int]] = {}
+    for link in db.query(
+        "SELECT g.guidance_id AS guidance_id, je.value AS function_id"
+        " FROM guidance g, json_each(g.function_ids) je",
+    ):
+        linked.setdefault(int(link["function_id"]), []).append(int(link["guidance_id"]))
+    for row in rows:
+        row["guidance_ids"] = (
+            []
+            if row.get("is_primitive")
+            else sorted(linked.get(int(row["function_id"]), []))
+        )
+    return rows
+
+
+_FUNCTION_JSON = set(db.FUNCTION_JSON_COLUMNS)
+
+
+def _encode_function_values(entry: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        column: (
+            db.dumps(value) if column in _FUNCTION_JSON and value is not None else value
+        )
+        for column, value in entry.items()
+    }
+
 
 # The fields a search query's words are looked for in, per function row.
 SEARCHED_FUNCTION_FIELDS = ("name", "docstring", "metadata")
@@ -366,34 +431,15 @@ class FunctionManager(BaseFunctionManager):
     """
     Keeps a catalogue of user-supplied Python functions and system primitives.
 
-    User-defined functions are stored in `Functions/Compositional` with auto-incrementing
+    Stored functions live in the ``functions`` table with auto-incrementing
     IDs. System primitives (the ``primitives.*`` namespace methods) live in the
-    read-only builtins catalogue with explicit stable IDs.
+    read-only ``primitives`` table with explicit stable IDs.
 
     This separation ensures:
     - User function IDs are stable (adding/removing primitives doesn't affect them)
     - Primitive IDs are consistent across all users (hash-based stable IDs)
     - No ID collisions between the two namespaces
     """
-
-    class Config:
-        required_contexts = [
-            TableContext(
-                name=FUNCTIONS_COMPOSITIONAL_TABLE,
-                description="User-defined functions with auto-incrementing IDs.",
-                fields=model_to_fields(Function),
-                unique_keys={"function_id": "int"},
-                auto_counting={"function_id": None},
-                foreign_keys=[
-                    {
-                        "name": "guidance_ids[*]",
-                        "references": "Guidance.guidance_id",
-                        "on_delete": "CASCADE",
-                        "on_update": "CASCADE",
-                    },
-                ],
-            ),
-        ]
 
     # ------------------------------------------------------------------ #
     #  Construction                                                      #
@@ -428,10 +474,7 @@ class FunctionManager(BaseFunctionManager):
         # time we create a function.  Initialised lazily on first use.
         self._next_id: Optional[int] = None
 
-        self._compositional_ctx = ContextRegistry.get_context(
-            self,
-            FUNCTIONS_COMPOSITIONAL_TABLE,
-        )
+        _seed_primitives()
 
         # ------------------------------------------------------------------ #
         #  In-process session state (for stateful/read_only modes)           #
@@ -446,7 +489,7 @@ class FunctionManager(BaseFunctionManager):
 
     @property
     def filter_scope(self) -> Optional[str]:
-        """A boolean expression permanently applied to all compositional read queries."""
+        """A SQL WHERE clause permanently applied to all compositional read queries."""
         return self._filter_scope
 
     @filter_scope.setter
@@ -464,107 +507,71 @@ class FunctionManager(BaseFunctionManager):
 
     @property
     def exclude_compositional_ids(self) -> Optional[FrozenSet[int]]:
-        """Compositional function IDs excluded from ``Functions/Compositional`` queries."""
+        """Stored function IDs excluded from every read of the ``functions`` table."""
         return self._exclude_compositional_ids
 
     @exclude_compositional_ids.setter
     def exclude_compositional_ids(self, value: Optional[FrozenSet[int]]) -> None:
         self._exclude_compositional_ids = frozenset(value) if value else None
 
-    @staticmethod
-    def _build_id_exclusion(ids: Optional[FrozenSet[int]]) -> Optional[str]:
-        """Build a filter clause excluding a set of function IDs.
+    def _compositional_scope(self, caller_filter: Optional[str] = None) -> str:
+        """The clause selecting this manager's visible stored functions."""
+        return and_clauses(
+            "is_primitive = 0",
+            caller_filter,
+            self._filter_scope,
+            not_in("function_id", self._exclude_compositional_ids),
+        )
 
-        Returns ``None`` when *ids* is empty or ``None``.
-        """
-        if not ids:
-            return None
-        sorted_ids = sorted(ids)
-        if len(sorted_ids) == 1:
-            return f"function_id != {sorted_ids[0]}"
-        joined_ids = ", ".join(str(fid) for fid in sorted_ids)
-        return f"function_id not in [{joined_ids}]"
+    def _discovery_scope(self, caller_filter: Optional[str] = None) -> str:
+        """The clause selecting everything discovery may return: stored functions
+        under ``filter_scope`` plus, when enabled, the scoped primitives."""
+        populations = [self._compositional_scope()]
+        if self._include_primitives:
+            populations.append(self._scoped_primitive_filter())
+        return and_clauses(caller_filter, or_clauses(*populations))
 
-    def _scoped_filter(self, caller_filter: Optional[str]) -> Optional[str]:
-        """Compose *caller_filter* with ``_filter_scope`` and compositional exclusions.
+    def _scoped_primitive_filter(self, caller_filter: Optional[str] = None) -> str:
+        """The clause selecting the primitives in scope, minus the excluded ids."""
+        return and_clauses(
+            "is_primitive = 1",
+            caller_filter,
+            self._registry.primitive_row_filter(self._primitive_scope),
+            not_in("function_id", self._exclude_primitive_ids),
+        )
 
-        Returns ``None`` when all parts are absent, meaning "no filter".
-        """
-        parts = [
-            p
-            for p in [
-                caller_filter,
-                self._filter_scope,
-                self._build_id_exclusion(self._exclude_compositional_ids),
-            ]
-            if p
-        ]
-        if not parts:
-            return None
-        if len(parts) == 1:
-            return parts[0]
-        return " and ".join(f"({p})" for p in parts)
-
-    def _scoped_primitive_filter(self) -> str:
-        """Compose ``primitive_row_filter`` with primitive exclusions.
-
-        Always returns a non-empty string (``primitive_row_filter`` never
-        returns empty for valid scopes).
-        """
-        base = self._registry.primitive_row_filter(self._primitive_scope)
-        excl = self._build_id_exclusion(self._exclude_primitive_ids)
-        if not excl:
-            return base
-        return f"({base}) and ({excl})"
-
-    def _primitive_read_specs(
+    def _rows(
         self,
+        where: Optional[str],
+        params: Sequence[Any] = (),
         *,
-        allowed_fields: Optional[List[str]] = None,
-    ) -> List[FederatedSearchContext]:
-        """Return the federated source holding this runtime's primitives.
-
-        Static primitives live once in the read-only builtins catalogue,
-        scope-filtered at read time.
-        """
-        return [
-            FederatedSearchContext(
-                context=BUILTINS_PRIMITIVES_CONTEXT,
-                source="primitives",
-                row_filter=self._scoped_primitive_filter(),
-                allowed_fields=allowed_fields,
-                project=builtins_project(),
-            ),
-        ]
+        limit: Optional[int] = None,
+        offset: int = 0,
+        readonly: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Read function rows from ``all_functions`` under ``where``."""
+        sql = _FUNCTION_SELECT
+        if where:
+            sql += f" WHERE {where}"
+        sql += " ORDER BY is_primitive, function_id"
+        if limit is not None:
+            sql += f" LIMIT {int(limit)} OFFSET {int(offset)}"
+        rows = db.query_readonly(sql, params) if readonly else db.query(sql, params)
+        return _attach_guidance_ids([_decode_function_row(row) for row in rows])
 
     def _primitive_logs(
         self,
         *,
         extra_filter: Optional[str] = None,
+        params: Sequence[Any] = (),
         limit: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
-        """Fetch primitive rows from every primitive source (non-ranked)."""
-        rows: List[Dict[str, Any]] = []
-        for spec in self._primitive_read_specs():
-            row_filter = spec.row_filter
-            if extra_filter:
-                row_filter = f"({extra_filter}) and ({row_filter})"
-            kwargs: Dict[str, Any] = {
-                "context": spec.context,
-                "project": spec.project,
-                "filter": row_filter,
-            }
-            if limit is not None:
-                kwargs["limit"] = limit
-            try:
-                logs = db.get_logs(**kwargs)
-            except _UnifyRequestError as e:
-                status = getattr(getattr(e, "response", None), "status_code", None)
-                if status == 404:
-                    continue
-                raise
-            rows.extend(lg.entries for lg in logs)
-        return rows
+        """Fetch the primitive rows in scope."""
+        return self._rows(
+            self._scoped_primitive_filter(extra_filter),
+            params,
+            limit=limit,
+        )
 
     @property
     def _dangerous_builtins(self) -> Set[str]:
@@ -714,17 +721,13 @@ class FunctionManager(BaseFunctionManager):
         *,
         function_id: int,
         raise_if_missing: bool = True,
-    ) -> Optional[db.Log]:
-        logs = db.get_logs(
-            context=self._compositional_ctx,
-            filter=f"function_id == {function_id}",
-        )
-        if len(logs) == 0:
+    ) -> Optional[Dict[str, Any]]:
+        rows = self._rows("is_primitive = 0 AND function_id = ?", (int(function_id),))
+        if not rows:
             if raise_if_missing:
                 raise ValueError(f"No function with id {function_id!r} exists.")
             return None
-        assert len(logs) == 1, f"Multiple functions found with id {function_id!r}."
-        return logs[0]
+        return rows[0]
 
     # ------------------------------------------------------------------ #
     #  Activation: the usage trace behind memory-weighted retrieval       #
@@ -741,11 +744,8 @@ class FunctionManager(BaseFunctionManager):
 
         Fire-and-forget off the caller's loop: metering must never slow or
         break execution, and a lost count only under-reports standing.
-        The read-modify-write can race a concurrent call and drop a count —
-        acceptable for a log-saturating signal. Primitives are platform
-        surface, not library memory, and are never traced. The owning
-        context comes from ``_federated_context`` (a row's trace must land
-        on the root that holds the row — ``_context`` is never set).
+        Primitives are platform surface, not library memory, and are never
+        traced.
         """
         settings = self.activation_settings
         if not settings.enabled:
@@ -755,31 +755,22 @@ class FunctionManager(BaseFunctionManager):
         fid = func_data.get("function_id")
         if fid is None:
             return
-        ctx = func_data.get("_federated_context") or self._compositional_ctx
         now_iso = datetime.now(timezone.utc).isoformat()
         kept = settings.recent_calls_kept
 
         def _write() -> None:
-            logs = db.get_logs(
-                context=ctx,
-                filter=f"function_id == {int(fid)}",
-                from_fields=["function_id", "usage_calls", "usage_recent_calls"],
-                limit=1,
+            row = db.query_one(
+                "SELECT usage_recent_calls FROM functions WHERE function_id = ?",
+                (int(fid),),
             )
-            if not logs:
+            if row is None:
                 return
-            entries = logs[0].entries or {}
-            recents = list(entries.get("usage_recent_calls") or [])
+            recents = list(db.loads(row["usage_recent_calls"]) or [])
             recents.append(now_iso)
-            db.update_logs(
-                logs=[logs[0].id],
-                context=ctx,
-                entries={
-                    "usage_calls": int(entries.get("usage_calls") or 0) + 1,
-                    "usage_last_called_at": now_iso,
-                    "usage_recent_calls": recents[-kept:],
-                },
-                overwrite=True,
+            db.execute(
+                "UPDATE functions SET usage_calls = usage_calls + 1,"
+                " usage_last_called_at = ?, usage_recent_calls = ? WHERE function_id = ?",
+                (now_iso, db.dumps(recents[-kept:]), int(fid)),
             )
 
         try:
@@ -792,38 +783,25 @@ class FunctionManager(BaseFunctionManager):
         settings = self.activation_settings
         if not settings.enabled:
             return
-        for row in rows:
-            fid = row.get("function_id")
-            if fid is None or row.get("is_primitive"):
-                continue
-            ctx = row.get("_federated_context") or self._compositional_ctx
+        ids = [
+            int(row["function_id"])
+            for row in rows
+            if row.get("function_id") is not None and not row.get("is_primitive")
+        ]
+        if not ids:
+            return
 
-            def _write(fid: int = int(fid), ctx: str = ctx) -> None:
-                logs = db.get_logs(
-                    context=ctx,
-                    filter=f"function_id == {fid}",
-                    from_fields=["function_id", "usage_search_hits"],
-                    limit=1,
-                )
-                if not logs:
-                    return
-                entries = logs[0].entries or {}
-                db.update_logs(
-                    logs=[logs[0].id],
-                    context=ctx,
-                    entries={
-                        "usage_search_hits": int(
-                            entries.get("usage_search_hits") or 0,
-                        )
-                        + 1,
-                    },
-                    overwrite=True,
-                )
+        def _write() -> None:
+            db.executemany(
+                "UPDATE functions SET usage_search_hits = usage_search_hits + 1"
+                " WHERE function_id = ?",
+                [(fid,) for fid in ids],
+            )
 
-            try:
-                self._write_off_loop(_write, what=f"search_hit:{row.get('name')}")
-            except Exception:  # noqa: BLE001 - metering must never break search
-                pass
+        try:
+            self._write_off_loop(_write, what="search_hits")
+        except Exception:  # noqa: BLE001 - metering must never break search
+            pass
 
     def _stamp_new_function_usage(
         self,
@@ -912,7 +890,7 @@ class FunctionManager(BaseFunctionManager):
                 and not in_scope(standing, settings)
             ):
                 continue
-            similarity = float(row.get(SCORE_FIELD) or 0.0)
+            similarity = float(row.get(SIMILARITY_FIELD) or 0.0)
             score = rank_score(similarity, standing, settings)
             row["_similarity"] = round(similarity, 4)
             row["_standing"] = round(standing, 4)
@@ -983,31 +961,11 @@ class FunctionManager(BaseFunctionManager):
 
     @functools.wraps(BaseFunctionManager.clear, updated=())
     def clear(self) -> None:
-        db.delete_context(self._compositional_ctx)
-
-        # Reset any manager-local counters or caches
-        try:
-            self._next_id = None
-            # Clear in-process session state
-            self._in_process_sessions.clear()
-        except Exception:
-            pass
-
-        # Force re-provisioning
-        ContextRegistry.refresh(self, "Functions/Compositional")
-
-        # Verify visibility before proceeding
-        try:
-            import time as _time  # local import to avoid polluting module namespace
-
-            for _ in range(3):
-                try:
-                    db.get_fields(context=self._compositional_ctx)
-                    break
-                except Exception:
-                    _time.sleep(0.05)
-        except Exception:
-            pass
+        with db.transaction() as conn:
+            conn.execute("DELETE FROM functions")
+            conn.execute("DELETE FROM sqlite_sequence WHERE name = 'functions'")
+        self._next_id = None
+        self._in_process_sessions.clear()
 
     def clear_in_process_sessions(self, session_id: Optional[int] = None) -> None:
         """
@@ -1227,9 +1185,9 @@ class FunctionManager(BaseFunctionManager):
                 docstring = inspect.getdoc(fn_obj) or ""
                 precondition = preconditions.get(name)
 
-                prior_log = None
+                prior = None
                 if name in existing_to_update:
-                    prior_log = self._get_log_by_function_id(
+                    prior = self._get_log_by_function_id(
                         function_id=existing_functions[name]["function_id"],
                         raise_if_missing=True,
                     )
@@ -1251,9 +1209,9 @@ class FunctionManager(BaseFunctionManager):
                     ],
                 }
 
-                if prior_log is not None:
+                if prior is not None:
                     # Update existing function
-                    log_id = prior_log.id
+                    log_id = int(prior["function_id"])
                     log_ids_to_update.append(log_id)
                     log_id_to_name[log_id] = name
                     entries_to_update.append(entry_data)
@@ -1261,7 +1219,6 @@ class FunctionManager(BaseFunctionManager):
                 else:
                     # Create new function
                     entry_data["name"] = name
-                    entry_data["guidance_ids"] = []
                     self._stamp_new_function_usage(entry_data, name)
                     entries_to_create.append(entry_data)
                     results[name] = "added"
@@ -1277,10 +1234,9 @@ class FunctionManager(BaseFunctionManager):
         # Batch create new functions
         if entries_to_create:
             try:
-                create_logs(
-                    context=self._compositional_ctx,
-                    entries=entries_to_create,
-                )
+                with db.transaction():
+                    for entry in entries_to_create:
+                        self._insert_function(entry)
             except Exception as e:
                 logger.error(
                     f"Failed to batch create function logs: {e}",
@@ -1294,12 +1250,9 @@ class FunctionManager(BaseFunctionManager):
         # Batch update existing functions
         if log_ids_to_update and entries_to_update:
             try:
-                db.update_logs(
-                    logs=log_ids_to_update,
-                    context=self._compositional_ctx,
-                    entries=[entry for entry in entries_to_update],
-                    overwrite=True,
-                )
+                with db.transaction():
+                    for function_id, entry in zip(log_ids_to_update, entries_to_update):
+                        self._update_function(function_id, entry)
             except Exception as e:
                 logger.error(
                     f"Failed to batch update function logs: {e}",
@@ -1324,68 +1277,30 @@ class FunctionManager(BaseFunctionManager):
     # ------------------------------------------------------------------ #
 
     def _get_function_data_by_name(self, *, name: str) -> Optional[Dict[str, Any]]:
-        """Retrieve a single compositional function record by name.
+        """Fetch a stored function's full record by exact name, or ``None``."""
+        rows = self._rows("is_primitive = 0 AND name = ?", (name,), limit=1)
+        return rows[0] if rows else None
 
-        Returns the full stored record (as a dict) or ``None`` if not found.
-        """
-        import time as _time
-
-        _gfdn_t0 = _time.perf_counter()
-        logger.debug(f"⏱️ [FM._get_function_data_by_name] start: {name}")
-
-        # Normalize to the Unify filter grammar (and avoid quote-escaping issues).
-        try:
-            normalized = normalize_filter_expr(f"name == {json.dumps(name)}")
-        except Exception:
-            normalized = f"name == {json.dumps(name)}"
-
-        last_exc: Exception | None = None
-
-        # The backend can return 404 for missing contexts in fresh projects/tests.
-        for attempt, delay in enumerate((0.0, 0.05, 0.15)):
-            if delay:
-                _time.sleep(delay)
-            try:
-                _q_t0 = _time.perf_counter()
-                logs = db.get_logs(
-                    context=self._compositional_ctx,
-                    filter=normalized,
-                    limit=1,
-                )
-                _q_ms = (_time.perf_counter() - _q_t0) * 1000
-                if logs:
-                    logger.debug(
-                        f"⏱️ [FM._get_function_data_by_name] found (attempt={attempt}, "
-                        f"query={_q_ms:.0f}ms, total={(_time.perf_counter() - _gfdn_t0) * 1000:.0f}ms)",
-                    )
-                    return logs[0].entries
-                logger.debug(
-                    f"⏱️ [FM._get_function_data_by_name] miss (attempt={attempt}, "
-                    f"query={_q_ms:.0f}ms, total={(_time.perf_counter() - _gfdn_t0) * 1000:.0f}ms)",
-                )
-                return None
-            except _UnifyRequestError as e:
-                status = getattr(getattr(e, "response", None), "status_code", None)
-                if status == 404:
-                    last_exc = e
-                    continue
-                raise
-            except Exception as e:
-                last_exc = e
-                break
-
-        # Treat missing context as empty library.
-        logger.debug(
-            f"⏱️ [FM._get_function_data_by_name] exhausted retries "
-            f"(total={(_time.perf_counter() - _gfdn_t0) * 1000:.0f}ms)",
+    @staticmethod
+    def _insert_function(entry: Dict[str, Any]) -> int:
+        values = _encode_function_values(entry)
+        values.setdefault("created_at", datetime.now(timezone.utc).isoformat())
+        columns = list(values)
+        cursor = db.execute(
+            f"INSERT INTO functions ({', '.join(columns)})"
+            f" VALUES ({', '.join('?' for _ in columns)})",
+            [values[column] for column in columns],
         )
-        if isinstance(last_exc, _UnifyRequestError):
-            status = getattr(getattr(last_exc, "response", None), "status_code", None)
-            if status == 404:
-                return None
-        if last_exc is not None:
-            raise last_exc
-        return None
+        return int(cursor.lastrowid)
+
+    @staticmethod
+    def _update_function(function_id: int, changes: Dict[str, Any]) -> None:
+        values = _encode_function_values(changes)
+        assignments = ", ".join(f"{column} = ?" for column in values)
+        db.execute(
+            f"UPDATE functions SET {assignments} WHERE function_id = ?",
+            [*values.values(), int(function_id)],
+        )
 
     def _create_in_process_callable(
         self,
@@ -1750,31 +1665,16 @@ class FunctionManager(BaseFunctionManager):
         """Return the complete ``{name: function_id}`` catalogue.
 
         Prefer this over :meth:`list_functions` when only ids are needed.
-        Compositional rows are read without ``filter_scope`` or environment
+        Stored functions are read without ``filter_scope`` or environment
         exclusions, so a reference resolves even when its function is hidden
         from discovery; ordinary list/filter/search operations remain scoped.
         """
-
-        mapping: Dict[str, int] = {}
-        try:
-            logs = db.get_logs(
-                context=self._compositional_ctx,
-                from_fields=["name", "function_id"],
+        mapping: Dict[str, int] = {
+            str(row["name"]): int(row["function_id"])
+            for row in db.query(
+                "SELECT name, function_id FROM functions ORDER BY function_id",
             )
-        except Exception:
-            logs = []
-        for lg in logs:
-            entries = lg.entries or {}
-            name = entries.get("name")
-            function_id = entries.get("function_id")
-            if (
-                isinstance(name, str)
-                and name
-                and function_id is not None
-                and name not in mapping
-            ):
-                mapping[name] = int(function_id)
-
+        }
         if self._include_primitives:
             for ent in self._primitive_logs():
                 name = ent.get("name")
@@ -1803,13 +1703,7 @@ class FunctionManager(BaseFunctionManager):
         if _return_callable and _namespace is None:
             raise ValueError("_namespace required when _return_callable=True")
 
-        compositional_rows = [
-            lg.entries
-            for lg in db.get_logs(
-                context=self._compositional_ctx,
-                filter=self._scoped_filter(None),
-            )
-        ]
+        compositional_rows = self._rows(self._compositional_scope())
 
         primitive_rows: List[Dict[str, Any]] = []
         if self._include_primitives:
@@ -1872,23 +1766,20 @@ class FunctionManager(BaseFunctionManager):
 
     @functools.wraps(BaseFunctionManager.get_precondition, updated=())
     def get_precondition(self, *, function_name: str) -> Optional[Dict[str, Any]]:
-        # Check compositional first, then optionally primitives.
-        logs = db.get_logs(
-            context=self._compositional_ctx,
-            filter=self._scoped_filter(f"name == '{function_name}'"),
+        rows = self._rows(
+            self._compositional_scope("name = ?"),
+            (function_name,),
             limit=1,
         )
-        if not logs and self._include_primitives:
-            primitive_rows = self._primitive_logs(
-                extra_filter=f"name == '{function_name}'",
+        if not rows and self._include_primitives:
+            rows = self._primitive_logs(
+                extra_filter="name = ?",
+                params=(function_name,),
                 limit=1,
             )
-            if primitive_rows:
-                return primitive_rows[0].get("precondition")
-        if not logs:
+        if not rows:
             return None
-
-        return logs[0].entries.get("precondition")
+        return rows[0].get("precondition")
 
     @staticmethod
     def _dependency_stale_reasons(
@@ -1909,7 +1800,7 @@ class FunctionManager(BaseFunctionManager):
         # scope/sync state, not whether the primitive actually exists and
         # runs -- so it can never be an authoritative "missing" signal.
         # Compositional dependencies are the only category this FunctionManager
-        # owns outright (Functions/Compositional), so only those are checked.
+        # owns outright (the ``functions`` table), so only those are checked.
         missing = [
             StaleReason(
                 dep_kind="depends_on",
@@ -1923,30 +1814,24 @@ class FunctionManager(BaseFunctionManager):
 
     def _available_dependency_names(
         self,
-        compositional_logs: Optional[List[Any]] = None,
+        rows: Optional[List[Dict[str, Any]]] = None,
     ) -> set[str]:
-        if compositional_logs is None:
-            compositional_logs = db.get_logs(
-                context=self._compositional_ctx,
-            )
-        return {
-            str(log.entries["name"])
-            for log in compositional_logs
-            if log.entries.get("name")
-        }
+        if rows is None:
+            rows = db.query("SELECT name FROM functions")
+        return {str(row["name"]) for row in rows if row.get("name")}
 
     def _append_missing_dependency_reasons(
         self,
         *,
-        logs: List[Any],
+        rows: List[Dict[str, Any]],
         missing_names: set[str],
     ) -> None:
-        for log in logs:
-            dependencies = set(log.entries.get("depends_on") or [])
+        for row in rows:
+            dependencies = set(row.get("depends_on") or [])
             matched = sorted(dependencies.intersection(missing_names))
             if not matched:
                 continue
-            existing = coerce_stale_reasons(log.entries.get("stale_reasons"))
+            existing = coerce_stale_reasons(row.get("stale_reasons"))
             merged = merge_stale_reasons(
                 existing,
                 *[
@@ -1962,37 +1847,30 @@ class FunctionManager(BaseFunctionManager):
                 reason.model_dump(mode="json") for reason in existing
             ]:
                 continue
-            db.update_logs(
-                context=self._compositional_ctx,
-                logs=[log.id],
-                entries={
+            self._update_function(
+                row["function_id"],
+                {
                     "stale_reasons": [
                         reason.model_dump(mode="json") for reason in merged
                     ],
                 },
-                overwrite=True,
             )
 
-    def _mark_guidance_stale_for_deleted_functions(
-        self,
+    @staticmethod
+    def _unlink_deleted_functions_from_guidance(
         deleted_functions: List[tuple[int, str]],
     ) -> None:
-        if not deleted_functions:
-            return
-        from ..guidance_manager.guidance_manager import GUIDANCE_TABLE, GuidanceManager
-
-        context = ContextRegistry.get_context(GuidanceManager, GUIDANCE_TABLE)
+        """Drop deleted ids from every guidance entry citing them, recording why."""
         for function_id, name in deleted_functions:
-            logs = db.get_logs(
-                context=context,
-                filter=f"{int(function_id)} in function_ids",
+            rows = db.query(
+                "SELECT guidance_id, function_ids, stale_reasons FROM guidance"
+                " WHERE EXISTS (SELECT 1 FROM json_each(function_ids) WHERE value = ?)",
+                (int(function_id),),
             )
-            for log in logs:
-                existing = coerce_stale_reasons(
-                    log.entries.get("stale_reasons"),
-                )
+            for row in rows:
+                db.decode(row, db.GUIDANCE_JSON_COLUMNS)
                 merged = merge_stale_reasons(
-                    existing,
+                    coerce_stale_reasons(row.get("stale_reasons")),
                     StaleReason(
                         dep_kind="function",
                         id=int(function_id),
@@ -2000,15 +1878,19 @@ class FunctionManager(BaseFunctionManager):
                         message=f"missing function_id={int(function_id)} name={name}",
                     ),
                 )
-                db.update_logs(
-                    context=context,
-                    logs=[log.id],
-                    entries={
-                        "stale_reasons": [
-                            reason.model_dump(mode="json") for reason in merged
-                        ],
-                    },
-                    overwrite=True,
+                db.execute(
+                    "UPDATE guidance SET function_ids = ?, stale_reasons = ? WHERE guidance_id = ?",
+                    (
+                        db.dumps(
+                            [
+                                fid
+                                for fid in row["function_ids"]
+                                if int(fid) != int(function_id)
+                            ],
+                        ),
+                        db.dumps([reason.model_dump(mode="json") for reason in merged]),
+                        int(row["guidance_id"]),
+                    ),
                 )
 
     # 3. Deletion ------------------------------------------------------- #
@@ -2034,18 +1916,17 @@ class FunctionManager(BaseFunctionManager):
             ValueError: If any of the requested function_ids correspond to
                 primitives (system-owned functions that cannot be deleted).
         """
-        # Normalize to list
-        function_ids = [function_id] if isinstance(function_id, int) else function_id
-
+        function_ids = (
+            [function_id] if isinstance(function_id, int) else list(function_id)
+        )
         if not function_ids:
             return {}
 
-        # Reject deletion of primitives (only check when primitives are enabled).
         if self._include_primitives:
-            id_clauses = " or ".join(f"function_id == {fid}" for fid in function_ids)
+            placeholders = ", ".join("?" for _ in function_ids)
             prim_rows = self._primitive_logs(
-                extra_filter=id_clauses,
-                limit=len(function_ids),
+                extra_filter=f"function_id IN ({placeholders})",
+                params=[int(fid) for fid in function_ids],
             )
             if prim_rows:
                 prim_names = [
@@ -2055,120 +1936,63 @@ class FunctionManager(BaseFunctionManager):
                     f"Cannot delete primitives (system-owned): {prim_names}",
                 )
 
-        def _load_compositional_logs():
-            return db.get_logs(context=self._compositional_ctx)
+        all_rows = self._rows("is_primitive = 0")
+        by_id = {int(row["function_id"]): row for row in all_rows}
+        requested = [int(fid) for fid in function_ids if int(fid) in by_id]
+        results: Dict[str, str] = {
+            f"function_{fid}": "already_deleted"
+            for fid in function_ids
+            if int(fid) not in by_id
+        }
+        if not requested:
+            return results
 
-        # Single-id: cheap existence check before any full-table scan.
-        if len(function_ids) == 1:
-            log = self._get_log_by_function_id(
-                function_id=function_ids[0],
-                raise_if_missing=False,
-            )
-            if log is None:
-                return {f"function_{function_ids[0]}": "already_deleted"}
-
-            target_name = log.entries["name"]
-            ids_to_delete = {function_ids[0]}
-            log_ids_to_delete = [log.id]
-            results = {target_name: "deleted"}
-            target_names = {target_name}
-            id_to_name = {function_ids[0]: target_name}
-            id_to_log = {function_ids[0]: log}
-            all_logs = None
-        else:
-            all_logs = _load_compositional_logs()
-            id_to_log = {lg.entries["function_id"]: lg for lg in all_logs}
-            id_to_name = {
-                lg.entries["function_id"]: lg.entries["name"] for lg in all_logs
-            }
-            ids_to_delete = set(function_ids)
-            target_names = {
-                id_to_name[fid] for fid in function_ids if fid in id_to_name
-            }
-
-            if not target_names:
-                return {}
-
-            log_ids_to_delete = [
-                id_to_log[fid].id for fid in function_ids if fid in id_to_log
-            ]
-            results = {
-                id_to_name[fid]: "deleted" for fid in function_ids if fid in id_to_name
-            }
+        ids_to_delete = set(requested)
+        for fid in requested:
+            results[by_id[fid]["name"]] = "deleted"
 
         if delete_dependents:
-            # BFS needs the full depends_on graph.
-            if all_logs is None:
-                all_logs = _load_compositional_logs()
-                id_to_log = {lg.entries["function_id"]: lg for lg in all_logs}
-                id_to_name = {
-                    lg.entries["function_id"]: lg.entries["name"] for lg in all_logs
-                }
-            function_deps = {
-                lg.entries["function_id"]: set(lg.entries.get("depends_on", []))
-                for lg in all_logs
-            }
-            to_process = set(target_names)
-            processed = set()
-
+            # BFS over the depends_on graph: every function calling a deleted
+            # name is deleted too, transitively.
+            to_process = {by_id[fid]["name"] for fid in requested}
+            processed: set[str] = set()
             while to_process:
                 current_name = to_process.pop()
                 if current_name in processed:
                     continue
                 processed.add(current_name)
-
-                for fid, deps in function_deps.items():
-                    if current_name in deps and fid not in ids_to_delete:
+                for fid, row in by_id.items():
+                    if (
+                        current_name in set(row.get("depends_on") or [])
+                        and fid not in ids_to_delete
+                    ):
                         ids_to_delete.add(fid)
-                        if fid in id_to_log:
-                            log_ids_to_delete.append(id_to_log[fid].id)
-                            dep_name = id_to_name[fid]
-                            results[dep_name] = "deleted"
-                            to_process.add(dep_name)
+                        results[row["name"]] = "deleted"
+                        to_process.add(row["name"])
         else:
             # Keep dependents, but record link debt on rows that still
-            # reference the deleted name(s). Need the compositional snapshot
-            # (list-membership filters are not reliable enough here).
-            if all_logs is None:
-                all_logs = _load_compositional_logs()
+            # reference the deleted name(s).
             self._append_missing_dependency_reasons(
-                logs=[
-                    log
-                    for log in all_logs
-                    if log.entries["function_id"] not in ids_to_delete
-                ],
-                missing_names=set(target_names),
+                rows=[row for fid, row in by_id.items() if fid not in ids_to_delete],
+                missing_names={by_id[fid]["name"] for fid in requested},
             )
 
-        self._mark_guidance_stale_for_deleted_functions(
-            [
-                (int(function_id), str(id_to_name[function_id]))
-                for function_id in sorted(ids_to_delete)
-                if function_id in id_to_name
-            ],
+        deleted = sorted(ids_to_delete)
+        self._unlink_deleted_functions_from_guidance(
+            [(fid, str(by_id[fid]["name"])) for fid in deleted],
         )
 
         # The librarian's supersede flow is delete-then-add: stash each
         # deleted row's usage trace by name so a same-process replacement
         # inherits its standing instead of restarting the popularity
-        # contest from zero. (A cross-process supersede loses the trace —
-        # the replacement simply starts as a newborn, which the grace
-        # already handles.)
-        for fid in ids_to_delete:
-            log = id_to_log.get(fid)
-            if log is not None:
-                self._stash_usage_legacy(
-                    id_to_name.get(fid),
-                    log.entries or {},
-                )
+        # contest from zero.
+        for fid in deleted:
+            self._stash_usage_legacy(by_id[fid]["name"], by_id[fid])
 
-        # Batch delete all functions
-        if log_ids_to_delete:
-            db.delete_logs(
-                context=self._compositional_ctx,
-                logs=log_ids_to_delete,
-            )
-
+        db.execute(
+            f"DELETE FROM functions WHERE function_id IN ({', '.join('?' for _ in deleted)})",
+            deleted,
+        )
         return results
 
     @functools.wraps(BaseFunctionManager.reconcile_dependencies, updated=())
@@ -2177,23 +2001,21 @@ class FunctionManager(BaseFunctionManager):
         *,
         function_ids: Optional[List[int]] = None,
     ) -> Dict[str, Any]:
-        all_logs = db.get_logs(
-            context=self._compositional_ctx,
-        )
+        all_rows = self._rows("is_primitive = 0")
         selected_ids = (
             {int(function_id) for function_id in function_ids}
             if function_ids is not None
             else None
         )
         selected = [
-            log
-            for log in all_logs
-            if selected_ids is None or int(log.entries["function_id"]) in selected_ids
+            row
+            for row in all_rows
+            if selected_ids is None or int(row["function_id"]) in selected_ids
         ]
-        available = self._available_dependency_names(all_logs)
+        available = self._available_dependency_names(all_rows)
         stale_function_ids: list[int] = []
-        for log in selected:
-            function = Function(**log.entries)
+        for row in selected:
+            function = Function(**row)
             refreshed = self._dependency_stale_reasons(
                 function.depends_on,
                 available_names=available,
@@ -2206,12 +2028,7 @@ class FunctionManager(BaseFunctionManager):
                 reason.model_dump(mode="json") for reason in function.stale_reasons
             ]:
                 continue
-            db.update_logs(
-                context=self._compositional_ctx,
-                logs=[log.id],
-                entries={"stale_reasons": serialized},
-                overwrite=True,
-            )
+            self._update_function(function.function_id, {"stale_reasons": serialized})
         return {
             "outcome": "dependencies reconciled",
             "details": {
@@ -2241,27 +2058,15 @@ class FunctionManager(BaseFunctionManager):
         if _return_callable and _namespace is None:
             raise ValueError("_namespace required when _return_callable=True")
 
-        caller_filter = normalize_filter_expr(filter)
-        contexts = [
-            FederatedSearchContext(
-                context=self._compositional_ctx,
-                source="compositional",
-                row_filter=self._scoped_filter(None),
-            ),
-        ]
-
-        if self._include_primitives:
-            contexts.extend(self._primitive_read_specs())
-
         try:
-            rows = federated_filter(
-                contexts,
-                filter=caller_filter,
-                offset=offset,
+            rows = self._rows(
+                self._discovery_scope(filter),
                 limit=limit,
+                offset=offset,
+                readonly=True,
             )
-        except ToolErrorException as exc:
-            return exc.payload
+        except sqlite3.Error as exc:
+            return invalid_filter_error(exc, filter, db.FUNCTION_COLUMNS).payload
 
         if not _return_callable:
             if not include_implementations:
@@ -2277,7 +2082,6 @@ class FunctionManager(BaseFunctionManager):
             namespace=_namespace,
         )
         if _also_return_metadata:
-            # Strip implementations from metadata if not requested
             metadata_rows = rows
             if not include_implementations:
                 metadata_rows = [
@@ -2320,51 +2124,8 @@ class FunctionManager(BaseFunctionManager):
                 _also_return_metadata=_also_return_metadata,
             )
 
-        allowed_fields = (
-            list(Function.model_fields.keys())
-            if _return_callable
-            else [
-                "function_id",
-                "name",
-                "argspec",
-                "docstring",
-                "depends_on",
-                "stale_reasons",
-                "precondition",
-                "guidance_ids",
-                "is_primitive",
-                "primitive_class",
-                "primitive_method",
-                "metadata",
-                "dependencies",
-                # The usage trace rides along so ranking can compute
-                # standing without a second read per row.
-                "created_at",
-                "usage_calls",
-                "usage_last_called_at",
-                "usage_recent_calls",
-                "usage_search_hits",
-            ]
-        )
-        if not _return_callable and include_implementations:
-            allowed_fields.append("implementation")
-
-        contexts = [
-            FederatedSearchContext(
-                context=self._compositional_ctx,
-                source="compositional",
-                row_filter=self._scoped_filter(None),
-                allowed_fields=allowed_fields,
-            ),
-        ]
-
-        if self._include_primitives:
-            contexts.extend(
-                self._primitive_read_specs(allowed_fields=allowed_fields),
-            )
-
         # Overfetch so the activation pass has candidates to rank and drop:
-        # the federated cut to `limit` happens before standing is known, and
+        # the text-match cut to `limit` happens before standing is known, and
         # a scope-filtered result set must still be able to fill n slots.
         activation_settings = self.activation_settings
         fetch_limit = (
@@ -2375,11 +2136,11 @@ class FunctionManager(BaseFunctionManager):
             if activation_settings.enabled
             else n
         )
-        results = federated_text_search(
-            contexts,
+        results = rank_by_text(
+            self._rows(self._discovery_scope()),
             {field: query for field in SEARCHED_FUNCTION_FIELDS},
             limit=fetch_limit,
-            unique_id_field="function_id",
+            id_field="function_id",
             backfill=True,
         )
         results = self._activation_rank(
@@ -2417,35 +2178,15 @@ class FunctionManager(BaseFunctionManager):
     #  Inverse linkage: Functions → Guidance                              #
     # ------------------------------------------------------------------ #
 
-    def _guidance_context(self) -> str:
-        ctxs = db.get_active_context()
-        read_ctx = ctxs.get("read")
-        return f"{read_ctx}/Guidance" if read_ctx else "Guidance"
-
-    def _get_guidance_ids_for_function(self, *, function_id: int) -> List[int]:
-        # Prefer reading from the function row if present
-        try:
-            log = self._get_log_by_function_id(function_id=function_id)
-            gids = log.entries.get("guidance_ids") or []
-            if isinstance(gids, list) and gids:
-                return [int(g) for g in gids]
-        except Exception:
-            pass
-
-        # Fallback: scan Guidance rows that reference this function via function_ids
-        gctx = self._guidance_context()
-        try:
-            rows = db.get_logs(
-                context=gctx,
-                filter=f"{int(function_id)} in function_ids",
-            )
-            return [
-                int(r.entries.get("guidance_id"))
-                for r in rows
-                if r.entries.get("guidance_id") is not None
-            ]
-        except Exception:
-            return []
+    @staticmethod
+    def _get_guidance_ids_for_function(*, function_id: int) -> List[int]:
+        rows = db.query(
+            "SELECT guidance_id FROM guidance"
+            " WHERE EXISTS (SELECT 1 FROM json_each(function_ids) WHERE value = ?)"
+            " ORDER BY guidance_id",
+            (int(function_id),),
+        )
+        return [int(row["guidance_id"]) for row in rows]
 
     def _get_guidance_for_function(
         self,
@@ -2458,32 +2199,15 @@ class FunctionManager(BaseFunctionManager):
         Each dict includes: guidance_id, title, content.
         """
         gids = self._get_guidance_ids_for_function(function_id=function_id)
+        if limit is not None and limit >= 0:
+            gids = gids[:limit]
         if not gids:
             return []
-        if limit is not None:
-            try:
-                limit = int(limit)
-            except Exception:
-                limit = None
-            if isinstance(limit, int) and limit >= 0:
-                gids = gids[:limit]
-        cond = " or ".join(f"guidance_id == {int(g)}" for g in gids)
-        gctx = self._guidance_context()
-        rows = db.get_logs(
-            context=gctx,
-            filter=cond or "False",
+        return db.query(
+            "SELECT guidance_id, title, content FROM guidance"
+            f" WHERE guidance_id IN ({', '.join('?' for _ in gids)}) ORDER BY guidance_id",
+            gids,
         )
-        out: List[Dict[str, Any]] = []
-        for lg in rows:
-            ent = lg.entries
-            out.append(
-                {
-                    "guidance_id": ent.get("guidance_id"),
-                    "title": ent.get("title"),
-                    "content": ent.get("content"),
-                },
-            )
-        return out
 
     async def execute_function(
         self,
@@ -2598,14 +2322,8 @@ class FunctionManager(BaseFunctionManager):
         name: str,
     ) -> Optional[Dict[str, Any]]:
         """Look up a primitive row by exact name from the primitive catalogue."""
-        try:
-            name_filter = normalize_filter_expr(f"name == {json.dumps(name)}")
-        except Exception:
-            name_filter = f"name == {json.dumps(name)}"
-        rows = self._primitive_logs(extra_filter=name_filter, limit=1)
-        if rows:
-            return dict(rows[0])
-        return None
+        rows = self._primitive_logs(extra_filter="name = ?", params=(name,), limit=1)
+        return dict(rows[0]) if rows else None
 
     async def _execute_primitive(
         self,

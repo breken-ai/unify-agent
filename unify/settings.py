@@ -94,12 +94,6 @@ class ProductionSettings(BaseSettings):
     UNIFY_TERMINAL_LOG_LEVEL: str = "INFO"
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Test Infrastructure
-    # ─────────────────────────────────────────────────────────────────────────
-    # Test mode flag
-    TEST: bool = False
-
-    # ─────────────────────────────────────────────────────────────────────────
     # Composed Manager Settings
     # ─────────────────────────────────────────────────────────────────────────
     # Each manager owns its settings in its own settings.py file.
@@ -115,7 +109,6 @@ class ProductionSettings(BaseSettings):
     @field_validator(
         "UNIFY_TERMINAL_LOG",
         "PYTEST_LOG_TO_FILE",
-        "TEST",
         "UNIFY_VALIDATE_LLM_PROVIDERS",
         mode="before",
     )

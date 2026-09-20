@@ -24,7 +24,7 @@ Use this to decide which component owns what and where its jurisdiction ends. Ke
 
 ### FunctionManager
 - **Role**: Catalogue of stored Python functions (the **what**) and their pip dependencies.
-- **Scope**: add/list/filter/search/delete over functions, execution in-process with dependencies ensured in the workspace environment, and the read-only builtins catalogue of every primitive the Actor can call.
+- **Scope**: add/list/filter/search/delete over functions, execution in-process with dependencies ensured in the workspace environment, and the read-only `primitives` table of every primitive the Actor can call, seeded from the primitive registry.
 - **Connections**:
   - **Steered by**: `Actor` (discovers and executes functions during plans; the storage review stores new ones).
   - **Steers**: —
@@ -32,10 +32,10 @@ Use this to decide which component owns what and where its jurisdiction ends. Ke
 ### GuidanceManager
 - **Role**: Owner of procedural how-to information (the **how**): step-by-step instructions, walkthroughs, and strategies for composing functions together.
 - **Scope**: CRUD (search, filter, add_guidance, update_guidance, delete_guidance) exposed as `GuidanceManager_*` JSON tools on the Actor. Read tools are gated by the discovery-first policy.
-- **Builtins library**: reads also federate over a global, read-only guidance catalogue (`Guidance` context in the `Builtins` project) holding entries imported from the Agent Skills ecosystem with stable hash-based ids and `is_builtin=True`. Seeded from the committed snapshot `unify/guidance_manager/builtins_guidance.json`; `update_guidance`/`delete_guidance` refuse builtin ids.
+- **Builtins library**: reads also cover the read-only `builtin_guidance` table (through the `all_guidance` view, `is_builtin = 1`) holding entries imported from the Agent Skills ecosystem with stable hash-based ids. Seeded from the committed snapshot `unify/guidance_manager/builtins_guidance.json` when a `GuidanceManager` is constructed; `update_guidance`/`delete_guidance` refuse builtin ids.
 - **Connections**:
   - **Steered by**: `Actor` (via `GuidanceManager_*` JSON tools).
-  - **Steers**: reads functions from the shared "Functions" context to surface linked functions.
+  - **Steers**: reads the `functions` table to surface linked functions.
 
 ### EventBus
 - **Role**: Cross‑cutting, in‑process publish/subscribe backbone and searchable event log used by every component for telemetry and coordination.

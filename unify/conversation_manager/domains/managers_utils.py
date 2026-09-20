@@ -28,13 +28,6 @@ if TYPE_CHECKING:
 event_broker = get_event_broker()
 
 
-def ensure_runtime_context(*, strict: bool = False) -> str:
-    """Rebind runtime context in this task and refresh ContextRegistry base."""
-    from unify.common.runtime_context import bind_runtime_context_root
-
-    return bind_runtime_context_root(strict=strict)
-
-
 # CHAT HISTORY
 
 
@@ -364,7 +357,6 @@ async def listen_to_operations(cm: "ConversationManager") -> None:
     _adopt_running_loop()
     # Wait for initialization to complete
     await wait_for_initialization(cm)
-    ensure_runtime_context()
 
     LOGGER.info(
         f"{ICONS['managers_worker']} [ManagersWorker] Operations listener started, processing queue...",
@@ -417,8 +409,7 @@ def _init_managers(
     """
     start_time = perf_counter()
 
-    # 0. Initialize the runtime (idempotent — SESSION_DETAILS.assistant.agent_id
-    #    is already populated, so unify.init() reads it for the context root).
+    # 0. Initialise the runtime (idempotent).
     LOGGER.debug(f"{ICONS['managers_worker']} [ManagersWorker] Initializing unify...")
     local_start_time = perf_counter()
     unify.init()
@@ -537,33 +528,11 @@ async def init_conv_manager(
             # Get the main event loop to pass to managers that need it
             loop = asyncio.get_running_loop()
 
-            # Anchor the canonical session root before and after worker init.
-            # unify.init() inside _init_managers sets the store ContextVars
-            # (CONTEXT_READ/CONTEXT_WRITE) but asyncio.to_thread runs on a
-            # copy of the caller's context — changes don't propagate back.
-            # Re-apply the context afterwards so any lazily-created managers
-            # in the main async context see the correct values.
-            _t0 = perf_counter()
-            ensure_runtime_context(strict=True)
-            log_startup_timing(
-                LOGGER,
-                "⏱️ [StartupTiming] managers.init_conv_manager.pre_thread_context duration=%.2fs",
-                perf_counter() - _t0,
-            )
-
             _t0 = perf_counter()
             await asyncio.to_thread(_init_managers, cm, loop, actor)
             log_startup_timing(
                 LOGGER,
                 "⏱️ [StartupTiming] managers.init_conv_manager.to_thread duration=%.2fs",
-                perf_counter() - _t0,
-            )
-
-            _t0 = perf_counter()
-            ensure_runtime_context(strict=True)
-            log_startup_timing(
-                LOGGER,
-                "⏱️ [StartupTiming] managers.init_conv_manager.reapply_context duration=%.2fs",
                 perf_counter() - _t0,
             )
 

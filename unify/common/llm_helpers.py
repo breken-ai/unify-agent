@@ -206,9 +206,6 @@ def _dumps(
     indent: int = None,
     context: dict | None = None,
 ) -> Any:
-    # prevents circular import
-    from unify.db import Log
-
     base = False
     if idx is None:
         base = True
@@ -218,8 +215,6 @@ def _dumps(
         ret = obj.model_dump(mode="json", context=context)
     elif inspect.isclass(obj) and issubclass(obj, BaseModel):
         ret = obj.model_json_schema()
-    elif isinstance(obj, Log):
-        ret = obj.to_json()
     elif isinstance(obj, dict):
         ret = {k: _dumps(v, idx + ["k"], context=context) for k, v in obj.items()}
     elif isinstance(obj, list):

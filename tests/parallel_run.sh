@@ -289,7 +289,7 @@ store_basename() {
 }
 
 # ---------------------------------------------------------------------------
-# Helper: build environment exports string from --env overrides, system env, and --tags
+# Helper: build environment exports string from --env overrides and system env
 # ---------------------------------------------------------------------------
 build_env_exports() {
   local exports=""
@@ -329,15 +329,6 @@ build_env_exports() {
     exports="$exports $kv"
   done
 
-  # Append UNIFY_TEST_TAGS if any tags were specified via --tags
-  if (( ${#TAGS[@]} > 0 )); then
-    local joined_tags
-    joined_tags=$(IFS=','; echo "${TAGS[*]}")
-    exports="$exports UNIFY_TEST_TAGS=$joined_tags"
-  elif ! is_var_in_env_overrides "UNIFY_TEST_TAGS" && [[ -n "${UNIFY_TEST_TAGS:-}" ]]; then
-    # Propagate from system env if not set via --tags or --env
-    exports="$exports UNIFY_TEST_TAGS=$UNIFY_TEST_TAGS"
-  fi
   echo "$exports"
 }
 

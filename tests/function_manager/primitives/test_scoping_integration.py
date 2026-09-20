@@ -20,7 +20,6 @@ from unify.function_manager.primitives import (
 from unify.function_manager.primitives.registry import get_primitive_sources
 from unify.function_manager.function_manager import FunctionManager
 from unify.actor.environments import ActorEnvironment
-from unify.common.context_registry import ContextRegistry
 from tests.helpers import _handle_project
 
 _ACTOR_ACT = "primitives.actor.act"
@@ -37,7 +36,6 @@ def scoped_function_manager_factory():
     managers = []
 
     def _create(scope: PrimitiveScope):
-        ContextRegistry.forget(FunctionManager, "Functions/Compositional")
         fm = FunctionManager(primitive_scope=scope)
         managers.append(fm)
         return fm

@@ -26,7 +26,6 @@ import pytest
 
 from tests.helpers import _handle_project
 from unify import db
-from unify.conversation_manager.domains.chat_history import ChatHistory
 from unify.conversation_manager.domains.managers_utils import run_boot_hydration
 from unify.conversation_manager.events import UnifyMessageReceived
 
@@ -37,11 +36,11 @@ PRIOR_ASSISTANT_REPLY = (
 INBOUND_AFTER_WAKE = "Did you file the Week 2 expenses yet?"
 
 
-def _store_prior_session(chat_history: ChatHistory) -> None:
+def _store_prior_session() -> None:
     """The durable world a rebooted CM hydrates: last week's exchange.
 
-    Written straight into the chat table the running history is bound to,
-    as a previous process would have left it.
+    Written straight into the ``messages`` table, as a previous process
+    would have left it.
     """
     from unify.common.prompt_helpers import now as prompt_now
 
@@ -50,12 +49,10 @@ def _store_prior_session(chat_history: ChatHistory) -> None:
         ("user", PRIOR_USER_ASK, base),
         ("assistant", PRIOR_ASSISTANT_REPLY, base + timedelta(minutes=1)),
     ):
-        db.log(
-            context=chat_history._ctx,
-            role=role,
-            content=content,
-            timestamp=ts.isoformat(),
-            attachments=[],
+        db.execute(
+            "INSERT INTO messages (role, content, timestamp, attachments)"
+            " VALUES (?, ?, ?, ?)",
+            (role, content, ts.isoformat(), db.dumps([])),
         )
 
 
@@ -162,7 +159,7 @@ async def test_first_turn_after_wake_renders_hydrated_history(initialized_cm):
 
         # Hydration lands: the prior session prepends into the conversation
         # and the boot wrapper reopens the gate.
-        _store_prior_session(cm.cm.chat_history)
+        _store_prior_session()
         restored = await run_boot_hydration(cm.cm)
         assert restored == 2
 

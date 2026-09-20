@@ -10,7 +10,6 @@ import pytest
 
 from unify.actor.environments.function_store import FunctionStoreEnvironment
 from unify.function_manager.function_manager import FunctionManager
-from unify.common.context_registry import ContextRegistry
 from tests.helpers import _handle_project
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -34,7 +33,6 @@ def fm_factory():
     managers = []
 
     def _create(**kwargs):
-        ContextRegistry.forget(FunctionManager, "Functions/Compositional")
         kwargs.setdefault("include_primitives", False)
         fm = FunctionManager(**kwargs)
         managers.append(fm)

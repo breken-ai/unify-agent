@@ -23,7 +23,7 @@ covers *how to work on the code*, not *what the code does*.
 
 Unify implements an AI assistant's brain as a persistent **conversation loop** above a code-writing **`Actor`**, with two **skill libraries** behind it: `FunctionManager` (stored Python functions, the *what*) and `GuidanceManager` (procedures, the *how*). The actor discovers skills before it writes code, runs plans in a persistent Python sandbox, and a storage review after each run distils what worked back into the libraries. Manager methods run inside an **async LLM tool loop** and return a **steerable handle** that supports `ask`, `interject`, `pause`, `resume`, `stop` — all the way down the nesting tree. The skill libraries expose direct CRUD methods as Actor JSON tools (`FunctionManager_*`, `GuidanceManager_*`).
 
-Everything persists in an in-process SQLite store, `unify/db/` (imported as `from unify import db`). There is no backend service, no accounts and no infrastructure: the only external dependency is an LLM provider reached through the sibling `unillm` repo (editable install via `[tool.uv.sources]` in `pyproject.toml`).
+Everything persists in one SQLite file, `unify/db.py` (imported as `from unify import db`): five tables (`functions`, `primitives`, `guidance`, `builtin_guidance`, `messages`) and two views (`all_functions`, `all_guidance`) over each catalogue and its seeded rows. Managers write plain SQL; every filter the model writes is a SQL `WHERE` clause run read-only. There is no backend service, no accounts and no infrastructure: the only external dependency is an LLM provider reached through the sibling `unillm` repo (editable install via `[tool.uv.sources]` in `pyproject.toml`).
 
 The assistant is **reactive**: it acts on the messages it receives and on the work those messages start. There is no scheduler, no timer wheel and no inbound channel other than the in-app chat.
 
@@ -157,14 +157,14 @@ unify/
 │   ├── cli.py               # Terminal chat (`python -m unify`)
 │   ├── actor/               # CodeAct Actor, central orchestrator
 │   ├── conversation_manager/ # The persistent interaction loop (slow brain)
-│   ├── db/                  # The local SQLite store and its expression language
+│   ├── db.py                # The local SQLite store: five tables, two views
 │   ├── guidance_manager/    # Procedures, SOPs
 │   ├── function_manager/    # Stored Python functions and their dependencies
 │   ├── workspace.py         # The assistant's working directory
 │   ├── events/              # Typed event bus
 │   └── common/              # Async tool loop, shared infra
 ├── tests/                   # Pytest suite
-├── scripts/                 # Skill import, builtins seeding, git hooks
+├── scripts/                 # Skill import, git hooks
 ├── docs/                    # Design writeups
 ├── ARCHITECTURE.md          # System design (read first)
 ├── README.md
@@ -182,7 +182,7 @@ unify/
 
 # Repository rules
 
-This project is an AI assistant implemented as a back office of cooperating managers, each dealing with one aspect of the assistant's persistent state, and each exposing an English-language public API. The public methods of most managers are asynchronous tool loops: a central LLM handles the English request by orchestrating lower-level tools that read and mutate that manager's rows in the local SQLite store (`unify/db/`). These methods are dynamic, and return handles for mid-flight steering, question answering, pausing, resuming and stopping. They are also often **nested**: the public API of one manager appears in the tool set of a higher-level manager, and a tool loop can steer its own in-flight inner tools, so steering reaches arbitrary depth. The `Actor` is the central intelligence, orchestrating the managers through code-first plans, and the `ConversationManager` is the persistent interaction loop above it. There are no "fast paths" or heuristics based on regex or substring detection of user input: when a method must respond correctly to a class of input, the fix is always a prompt or a tool docstring that **nudges** the LLM.
+This project is an AI assistant implemented as a back office of cooperating managers, each dealing with one aspect of the assistant's persistent state, and each exposing an English-language public API. The public methods of most managers are asynchronous tool loops: a central LLM handles the English request by orchestrating lower-level tools that read and mutate that manager's rows in the local SQLite store (`unify/db.py`). These methods are dynamic, and return handles for mid-flight steering, question answering, pausing, resuming and stopping. They are also often **nested**: the public API of one manager appears in the tool set of a higher-level manager, and a tool loop can steer its own in-flight inner tools, so steering reaches arbitrary depth. The `Actor` is the central intelligence, orchestrating the managers through code-first plans, and the `ConversationManager` is the persistent interaction loop above it. There are no "fast paths" or heuristics based on regex or substring detection of user input: when a method must respond correctly to a class of input, the fix is always a prompt or a tool docstring that **nudges** the LLM.
 
 # Local Development Environment
 
@@ -526,7 +526,7 @@ Use this to decide which component owns what and where its jurisdiction ends. Ke
 
 ### FunctionManager
 - **Role**: Catalogue of stored Python functions (the **what**) and their pip dependencies.
-- **Scope**: add/list/filter/search/delete over functions, execution in-process with dependencies ensured in the workspace environment, and the read-only builtins catalogue of every primitive the Actor can call.
+- **Scope**: add/list/filter/search/delete over functions, execution in-process with dependencies ensured in the workspace environment, and the read-only `primitives` table of every primitive the Actor can call, seeded from the primitive registry.
 - **Connections**:
   - **Steered by**: `Actor` (discovers and executes functions during plans; the storage review stores new ones).
   - **Steers**: —
@@ -534,10 +534,10 @@ Use this to decide which component owns what and where its jurisdiction ends. Ke
 ### GuidanceManager
 - **Role**: Owner of procedural how-to information (the **how**): step-by-step instructions, walkthroughs, and strategies for composing functions together.
 - **Scope**: CRUD (search, filter, add_guidance, update_guidance, delete_guidance) exposed as `GuidanceManager_*` JSON tools on the Actor. Read tools are gated by the discovery-first policy.
-- **Builtins library**: reads also federate over a global, read-only guidance catalogue (`Guidance` context in the `Builtins` project) holding entries imported from the Agent Skills ecosystem with stable hash-based ids and `is_builtin=True`. Seeded from the committed snapshot `unify/guidance_manager/builtins_guidance.json`; `update_guidance`/`delete_guidance` refuse builtin ids.
+- **Builtins library**: reads also cover the read-only `builtin_guidance` table (through the `all_guidance` view, `is_builtin = 1`) holding entries imported from the Agent Skills ecosystem with stable hash-based ids. Seeded from the committed snapshot `unify/guidance_manager/builtins_guidance.json` when a `GuidanceManager` is constructed; `update_guidance`/`delete_guidance` refuse builtin ids.
 - **Connections**:
   - **Steered by**: `Actor` (via `GuidanceManager_*` JSON tools).
-  - **Steers**: reads functions from the shared "Functions" context to surface linked functions.
+  - **Steers**: reads the `functions` table to surface linked functions.
 
 ### EventBus
 - **Role**: Cross‑cutting, in‑process publish/subscribe backbone and searchable event log used by every component for telemetry and coordination.
@@ -559,8 +559,7 @@ When fixing infrastructure issues (especially concurrency, race conditions, or f
 
 Tests in this repo have significant overhead:
 - LLM calls (cached: milliseconds, uncached: seconds to minutes)
-- Backend API connections and context setup
-- Fixture initialization and scenario seeding
+- Fixture initialisation and catalogue seeding
 
 A targeted verification script can validate a fix in **seconds** rather than waiting minutes for tests that may not even reliably reproduce the issue.
 

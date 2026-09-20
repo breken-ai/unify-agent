@@ -247,7 +247,7 @@ class BaseFunctionManager(BaseStateManager):
         _also_return_metadata: bool = False,
     ) -> List[Dict[str, Any]]:
         """
-        Filter stored function metadata using a Python expression.
+        Filter stored function metadata with a SQL ``WHERE`` clause.
 
         Each result conforms to the ``Function`` schema and includes a
         ``guidance_ids`` field — a list of identifiers for related guidance
@@ -256,16 +256,17 @@ class BaseFunctionManager(BaseStateManager):
         Parameters
         ----------
         filter : str | None, default ``None``
-            A boolean expression evaluated per row with fields of the
-            ``Function`` model in scope (e.g. ``name``, ``argspec``,
-            ``docstring``, ``depends_on``). When ``None``, returns all rows subject
-            to pagination. Supported grammar: comparisons (==, !=, <, <=, >, >=),
-            membership tests (in / not in), and boolean combinators (and, or,
-            not) over field names and literal values, plus a fixed set of
-            helpers (``len()``, string methods like ``.lower()`` /
-            ``.startswith()``). Arbitrary Python calls outside that set —
-            e.g. ``' '.join(depends_on)`` or a list comprehension — are
-            rejected.
+            A SQLite ``WHERE`` clause (without the ``WHERE`` keyword) over the
+            function table's columns: ``function_id``, ``name``, ``argspec``,
+            ``docstring``, ``implementation``, ``depends_on``,
+            ``stale_reasons``, ``precondition``, ``metadata``,
+            ``dependencies``, ``created_at``, ``usage_calls``,
+            ``usage_last_called_at``, ``usage_search_hits``, ``is_primitive``
+            (0 or 1), ``primitive_class``, ``primitive_method``. List and dict
+            columns hold JSON text: test membership with
+            ``EXISTS (SELECT 1 FROM json_each(depends_on) WHERE value = 'helper')``.
+            When ``None``, returns all rows subject to pagination. The clause
+            is executed read-only; anything other than a read is rejected.
         offset : int, default ``0``
             Zero‑based index of the first result to return.
         limit : int, default ``100``
@@ -307,8 +308,8 @@ class BaseFunctionManager(BaseStateManager):
 
         Examples
         --------
-        >>> mgr.filter_functions(filter="'price' in docstring and 'sum' in depends_on")
-        >>> mgr.filter_functions(filter="name.startswith('get_')")
+        >>> mgr.filter_functions(filter="docstring LIKE '%price%' AND is_primitive = 0")
+        >>> mgr.filter_functions(filter="name LIKE 'get_%'")
         """
 
     @abstractmethod

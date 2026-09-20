@@ -18,16 +18,10 @@ if TYPE_CHECKING:
 _conversation_manager: Optional["ConversationManager"] = None
 
 
-async def start_async(
-    *,
-    project_name: str = "Assistants",
-) -> "ConversationManager":
+async def start_async() -> "ConversationManager":
     """Start the ConversationManager in-process and return it.
 
     A second call while one is running returns the running instance.
-
-    Args:
-        project_name: Project name for logging
     """
     global _conversation_manager
 
@@ -40,7 +34,7 @@ async def start_async(
     # Import here to avoid circular imports
     from unify.conversation_manager.main import run_conversation_manager
 
-    _conversation_manager = await run_conversation_manager(project_name=project_name)
+    _conversation_manager = await run_conversation_manager()
 
     return _conversation_manager
 

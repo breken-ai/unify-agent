@@ -21,7 +21,6 @@ from typing import TYPE_CHECKING
 _REPO_ROOT = Path(__file__).parent.parent.resolve()
 os.environ.setdefault("UNILLM_CACHE_DIR", str(_REPO_ROOT))
 
-from pydantic.fields import computed_field
 
 from unify.settings import ProductionSettings
 
@@ -44,27 +43,12 @@ class TestingSettings(ProductionSettings):
     UNIFY_INCREMENTING_TIMESTAMPS: bool = (
         False  # Auto-increment timestamps for NEW markers
     )
-    UNIFY_DELETE_CONTEXT_ON_EXIT: bool = False
-    UNIFY_OVERWRITE_PROJECT: bool = False
-    # Each pytest process owns its own store, so deleting the project at the
-    # session boundary only matters when a store is reused across runs via
-    # UNIFY_STORE_PATH. Both are opt-in.
-    UNIFY_TESTS_DELETE_PROJ_ON_START: bool = False
-    UNIFY_TESTS_DELETE_PROJ_ON_EXIT: bool = False
     UNIFY_CACHE_STATS: bool = False
-    UNIFY_TEST_TAGS: str = ""  # Comma-separated list of tags for duration logging
-    UNIFY_TEST_PROJECT_NAME: str = "UnityTests"
 
     # ─────────────────────────────────────────────────────────────────────────
     # File Lock Settings (for parallel test coordination)
     # ─────────────────────────────────────────────────────────────────────────
     UNIFY_FILE_LOCK_TIMEOUT: float = 3600.0  # 1 hour - handles slow tests under load
-
-    @computed_field
-    @property
-    def test_project_name(self) -> str:
-        """Return the project name every test session activates."""
-        return self.UNIFY_TEST_PROJECT_NAME
 
 
 class _SettingsProxy:

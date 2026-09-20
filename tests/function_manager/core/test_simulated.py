@@ -115,7 +115,7 @@ def test_delete_function_acknowledges():
 @pytest.mark.llm_call
 def test_search_functions_returns_list_of_dicts():
     fm = SimulatedFunctionManager()
-    hits = fm.filter_functions(filter="'price' in docstring")
+    hits = fm.filter_functions(filter="docstring LIKE '%price%'")
     assert isinstance(hits, list) and hits
     first = hits[0]
     assert isinstance(first, dict)
@@ -209,12 +209,12 @@ pytestmark_eval = pytest.mark.eval
 @pytest.mark.llm_call
 def test_filter_scope_respected_in_list_functions():
     """
-    A SimulatedFunctionManager with filter_scope="'data' in docstring" should
+    A SimulatedFunctionManager with filter_scope="docstring LIKE '%data%'" should
     only return functions whose docstring mentions data from list_functions.
     """
     fm = SimulatedFunctionManager(
         description="A mixed catalogue of data-processing and networking utility functions",
-        filter_scope="'data' in docstring",
+        filter_scope="docstring LIKE '%data%'",
     )
     listing = fm.list_functions()
     assert isinstance(listing, dict) and listing
@@ -222,7 +222,7 @@ def test_filter_scope_respected_in_list_functions():
         docstring = meta.get("docstring", "")
         assert (
             "data" in docstring
-        ), f"filter_scope=\"'data' in docstring\" but {name!r} has docstring={docstring!r}"
+        ), f"filter_scope=\"docstring LIKE '%data%'\" but {name!r} has docstring={docstring!r}"
 
 
 # --------------------------------------------------------------------------- #
@@ -235,8 +235,8 @@ def test_filter_scope_setter():
     fm = SimulatedFunctionManager()
     assert fm.filter_scope is None
 
-    fm.filter_scope = "'data' in docstring"
-    assert fm.filter_scope == "'data' in docstring"
+    fm.filter_scope = "docstring LIKE '%data%'"
+    assert fm.filter_scope == "docstring LIKE '%data%'"
 
     fm.filter_scope = None
     assert fm.filter_scope is None

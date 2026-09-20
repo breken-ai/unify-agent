@@ -89,7 +89,7 @@ For PRs that touch a specific subsystem, the table below is a rough guide to who
 |---|---|
 | `unify/actor/` (CodeAct Actor) | @YushaArif99, @djl11 |
 | `unify/conversation_manager/` (the interaction loop) | @djl11, @vedpatwardhan, @juliagsy |
-| `unify/db/` (the local store) | @djl11 |
+| `unify/db.py` (the local store) | @djl11 |
 | `unify/function_manager/` | @djl11, @YushaArif99, @juliagsy |
 | `unify/guidance_manager/` | @djl11 |
 | `tests/conftest.py`, `tests/parallel_run.sh` | @djl11, @CatB1t |

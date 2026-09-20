@@ -6,10 +6,10 @@ CLEAR_METHOD_DOCSTRING = ("""
     WARNING: Irreversible total data erasure.
 
     This clear operation will permanently and completely delete all records,
-    caches, contexts, tables, and any other stored state managed by this component.
+    caches, tables, and any other stored state managed by this component.
     After it runs, the manager will be in the same state as a brand-new instance
     that has just been initialized for the first time, with absolutely no prior
-    state preserved in any backend or context.
+    state preserved anywhere.
 
     Mandatory confirmation
     ----------------------

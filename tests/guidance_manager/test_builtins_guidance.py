@@ -1,27 +1,24 @@
-"""Integration tests for the global builtins guidance catalogue.
+"""Tests for the builtin guidance library.
 
-Each test seeds a dedicated public-read builtins project (unique name per
-test, settings-overridden) so parallel runs never contend on the shared
-platform catalogue, then exercises the GuidanceManager read federation,
-multi-field text search, delta seeding, and mutation refusal.
+The ``builtin_guidance`` table is seeded from the committed snapshot and read
+alongside the assistant's own ``guidance`` rows through the ``all_guidance``
+view. ``db.clear()`` leaves the seeded catalogue alone, so a test that seeds
+its own entries restores the snapshot before it returns.
 """
 
 from __future__ import annotations
 
-import uuid
-
 import pytest
 from unify import db
-from tests.helpers import _handle_project
-from unify.guidance_manager.builtins_catalog import (
-    BUILTINS_GUIDANCE_CONTEXT,
-    default_guidance_entries,
+from unify.guidance_manager.builtins import (
     load_snapshot,
     seed_builtin_guidance,
     stable_guidance_id,
 )
-from unify.guidance_manager.guidance_manager import GuidanceManager
-from unify.settings import SETTINGS
+from unify.guidance_manager.guidance_manager import (
+    GUIDANCE_PREVIEW_CHARS,
+    GuidanceManager,
+)
 
 _ENTRIES = {
     "test/ffmpeg-frames": {
@@ -42,24 +39,19 @@ _ENTRIES = {
 
 
 @pytest.fixture
-def builtins_test_project(monkeypatch):
-    """Point the builtins project at a unique per-test name and clean it up."""
-    name = f"BuiltinsTest-{uuid.uuid4().hex[:10]}"
-    monkeypatch.setattr(SETTINGS, "UNIFY_BUILTINS_PROJECT", name)
-    yield name
-    try:
-        db.delete_project(name)
-    except Exception:
-        pass
+def test_entries():
+    """Seed the two test entries; restore the snapshot afterwards."""
+    seed_builtin_guidance(entries=_ENTRIES)
+    yield _ENTRIES
+    seed_builtin_guidance()
 
 
-def _builtin_rows(project: str) -> dict[str, dict]:
-    logs = db.get_logs(
-        project=project,
-        context=BUILTINS_GUIDANCE_CONTEXT,
-        from_fields=["guidance_id", "title", "content", "is_builtin"],
+def _builtin_rows() -> dict[str, dict]:
+    rows = db.query(
+        "SELECT guidance_id, title, content, is_builtin FROM all_guidance"
+        " WHERE is_builtin = 1",
     )
-    return {log.entries["title"]: log.entries for log in logs}
+    return {row["title"]: row for row in rows}
 
 
 # --------------------------------------------------------------------------- #
@@ -67,48 +59,50 @@ def _builtin_rows(project: str) -> dict[str, dict]:
 # --------------------------------------------------------------------------- #
 
 
-@_handle_project
-def test_seed_builtin_guidance_delta_and_idempotent(builtins_test_project):
-    project = builtins_test_project
+def test_seed_builtin_guidance_delta_and_idempotent():
+    try:
+        assert seed_builtin_guidance(entries=_ENTRIES) is True
+        rows = _builtin_rows()
+        assert set(rows) == {entry["title"] for entry in _ENTRIES.values()}
+        for entry in _ENTRIES.values():
+            row = rows[entry["title"]]
+            assert row["is_builtin"] == 1
+            assert row["guidance_id"] == stable_guidance_id(entry["title"])
+            assert row["content"] == entry["content"]
 
-    assert seed_builtin_guidance(entries=_ENTRIES) is True
-    rows = _builtin_rows(project)
-    assert set(rows) == {entry["title"] for entry in _ENTRIES.values()}
-    for entry in _ENTRIES.values():
-        row = rows[entry["title"]]
-        assert row["is_builtin"] is True
-        assert row["guidance_id"] == stable_guidance_id(entry["title"])
-        assert row["content"] == entry["content"]
+        # Converged: re-seeding writes nothing.
+        assert seed_builtin_guidance(entries=_ENTRIES) is False
 
-    # Converged: re-seeding writes nothing.
-    assert seed_builtin_guidance(entries=_ENTRIES) is False
+        # Changed content is rewritten; the other row keeps its content.
+        changed = {key: dict(entry) for key, entry in _ENTRIES.items()}
+        changed["test/arxiv-search"]["content"] = "Updated arXiv instructions."
+        assert seed_builtin_guidance(entries=changed) is True
+        rows = _builtin_rows()
+        assert rows["[test] arxiv-search"]["content"] == "Updated arXiv instructions."
+        assert rows["[test] ffmpeg-frames"]["content"] == (
+            _ENTRIES["test/ffmpeg-frames"]["content"]
+        )
 
-    # Delta: only the changed skill is rewritten; the other row is untouched.
-    changed = {key: dict(entry) for key, entry in _ENTRIES.items()}
-    changed["test/arxiv-search"]["content"] = "Updated arXiv instructions."
-    assert seed_builtin_guidance(entries=changed) is True
-    rows = _builtin_rows(project)
-    assert rows["[test] arxiv-search"]["content"] == "Updated arXiv instructions."
-    assert rows["[test] ffmpeg-frames"]["content"] == (
-        _ENTRIES["test/ffmpeg-frames"]["content"]
-    )
+        # Removal: entries dropped from the snapshot disappear from the table.
+        only_ffmpeg = {"test/ffmpeg-frames": _ENTRIES["test/ffmpeg-frames"]}
+        assert seed_builtin_guidance(entries=only_ffmpeg) is True
+        assert set(_builtin_rows()) == {"[test] ffmpeg-frames"}
 
-    # Removal: skills dropped from the snapshot disappear from the catalogue.
-    only_ffmpeg = {"test/ffmpeg-frames": _ENTRIES["test/ffmpeg-frames"]}
-    assert seed_builtin_guidance(entries=only_ffmpeg) is True
-    assert set(_builtin_rows(project)) == {"[test] ffmpeg-frames"}
-
-
-@_handle_project
-def test_seed_builtin_guidance_empty_snapshot_is_noop(builtins_test_project):
-    assert seed_builtin_guidance(entries={}) is False
-    assert seed_builtin_guidance(entries={}) is False
-    assert _builtin_rows(builtins_test_project) == {}
+        # An empty snapshot empties the table, then converges.
+        assert seed_builtin_guidance(entries={}) is True
+        assert _builtin_rows() == {}
+        assert seed_builtin_guidance(entries={}) is False
+    finally:
+        seed_builtin_guidance()
 
 
 def test_default_catalogue_is_converged():
-    """The session-start seeding already converged the shared catalogue."""
+    """Constructing a GuidanceManager seeds the snapshot; re-seeding is a no-op."""
+    GuidanceManager()
     assert seed_builtin_guidance() is False
+    snapshot = load_snapshot()
+    assert len(snapshot) == 14
+    assert set(_builtin_rows()) == {entry["title"] for entry in snapshot.values()}
 
 
 # --------------------------------------------------------------------------- #
@@ -116,19 +110,11 @@ def test_default_catalogue_is_converged():
 # --------------------------------------------------------------------------- #
 
 
-@_handle_project
-def test_default_library_seeds_and_surfaces_through_guidance_manager(
-    builtins_test_project,
-):
-    snapshot = load_snapshot()
-    assert len(snapshot) == 58
-    entries = default_guidance_entries()
-    assert entries == snapshot
-
-    assert seed_builtin_guidance() is True
-
+def test_default_library_surfaces_through_guidance_manager():
+    entries = load_snapshot()
     gm = GuidanceManager()
-    builtin_rows = gm.filter(filter="is_builtin == True", limit=100)
+
+    builtin_rows = gm.filter(filter="is_builtin = 1", limit=100)
     assert {row.title for row in builtin_rows} == {
         entry["title"] for entry in entries.values()
     }
@@ -136,8 +122,6 @@ def test_default_library_seeds_and_surfaces_through_guidance_manager(
 
     # List-style reads return bounded previews (large skills would otherwise
     # flood the caller's context window), each pointing at get_guidance.
-    from unify.guidance_manager.guidance_manager import GUIDANCE_PREVIEW_CHARS
-
     preview_slack = 200  # truncation marker text
     for row in builtin_rows:
         assert len(row.content) <= GUIDANCE_PREVIEW_CHARS + preview_slack
@@ -155,9 +139,7 @@ def test_default_library_seeds_and_surfaces_through_guidance_manager(
         assert len(full.content) > GUIDANCE_PREVIEW_CHARS
 
 
-@_handle_project
-def test_default_library_text_search(builtins_test_project):
-    seed_builtin_guidance()
+def test_default_library_text_search():
     gm = GuidanceManager()
 
     results = gm.search(
@@ -174,9 +156,7 @@ def test_default_library_text_search(builtins_test_project):
     assert all(row.is_builtin for row in multi)
 
 
-@_handle_project
-def test_get_guidance_resolves_own_and_builtin_entries(builtins_test_project):
-    seed_builtin_guidance(entries=_ENTRIES)
+def test_get_guidance_resolves_own_and_builtin_entries(test_entries):
     gm = GuidanceManager()
     outcome = gm.add_guidance(title="mine", content="my own entry")
     own_id = outcome["details"]["guidance_id"]
@@ -187,20 +167,18 @@ def test_get_guidance_resolves_own_and_builtin_entries(builtins_test_project):
     builtin_id = stable_guidance_id("[test] arxiv-search")
     builtin = gm.get_guidance(guidance_id=builtin_id)
     assert builtin.is_builtin is True
-    assert builtin.content == _ENTRIES["test/arxiv-search"]["content"]
+    assert builtin.content == test_entries["test/arxiv-search"]["content"]
 
     with pytest.raises(ValueError, match="No guidance found"):
         gm.get_guidance(guidance_id=999999999)
 
 
 # --------------------------------------------------------------------------- #
-# Read federation                                                              #
+# Reads over both populations                                                  #
 # --------------------------------------------------------------------------- #
 
 
-@_handle_project
-def test_guidance_reads_blend_builtins_and_own_entries(builtins_test_project):
-    seed_builtin_guidance(entries=_ENTRIES)
+def test_guidance_reads_blend_builtins_and_own_entries(test_entries):
     gm = GuidanceManager()
     gm.add_guidance(
         title="My deploy checklist",
@@ -211,7 +189,7 @@ def test_guidance_reads_blend_builtins_and_own_entries(builtins_test_project):
     by_title = {row.title: row for row in rows}
     assert "My deploy checklist" in by_title
     assert by_title["My deploy checklist"].is_builtin is False
-    for entry in _ENTRIES.values():
+    for entry in test_entries.values():
         assert entry["title"] in by_title
         assert by_title[entry["title"]].is_builtin is True
         assert by_title[entry["title"]].guidance_id == stable_guidance_id(
@@ -221,15 +199,15 @@ def test_guidance_reads_blend_builtins_and_own_entries(builtins_test_project):
     assert gm._num_items() == 3
 
     # Filtering on the provenance flag targets each population explicitly.
-    builtin_only = gm.filter(filter="is_builtin == True", limit=100)
+    builtin_only = gm.filter(filter="is_builtin = 1", limit=100)
     assert {row.title for row in builtin_only} == {
-        entry["title"] for entry in _ENTRIES.values()
+        entry["title"] for entry in test_entries.values()
     }
+    own_only = gm.filter(filter="is_builtin = 0", limit=100)
+    assert [row.title for row in own_only] == ["My deploy checklist"]
 
 
-@_handle_project
-def test_single_term_search_returns_builtins(builtins_test_project):
-    seed_builtin_guidance(entries=_ENTRIES)
+def test_single_term_search_returns_builtins(test_entries):
     gm = GuidanceManager()
 
     results = gm.search(
@@ -241,9 +219,7 @@ def test_single_term_search_returns_builtins(builtins_test_project):
     assert results[0].is_builtin is True
 
 
-@_handle_project
-def test_multi_term_search_combines_builtins_scores(builtins_test_project):
-    seed_builtin_guidance(entries=_ENTRIES)
+def test_multi_term_search_combines_builtins_scores(test_entries):
     gm = GuidanceManager()
 
     results = gm.search(
@@ -258,9 +234,7 @@ def test_multi_term_search_combines_builtins_scores(builtins_test_project):
     assert results[0].is_builtin is True
 
 
-@_handle_project
-def test_exclude_ids_apply_to_builtins(builtins_test_project):
-    seed_builtin_guidance(entries=_ENTRIES)
+def test_exclude_ids_apply_to_builtins(test_entries):
     gm = GuidanceManager()
     excluded = stable_guidance_id("[test] ffmpeg-frames")
     gm.exclude_ids = frozenset({excluded})
@@ -275,9 +249,7 @@ def test_exclude_ids_apply_to_builtins(builtins_test_project):
 # --------------------------------------------------------------------------- #
 
 
-@_handle_project
-def test_update_and_delete_builtin_guidance_refused(builtins_test_project):
-    seed_builtin_guidance(entries=_ENTRIES)
+def test_update_and_delete_builtin_guidance_refused(test_entries):
     gm = GuidanceManager()
     builtin_id = stable_guidance_id("[test] arxiv-search")
 
@@ -287,11 +259,12 @@ def test_update_and_delete_builtin_guidance_refused(builtins_test_project):
         gm.delete_guidance(guidance_id=builtin_id)
 
     # The catalogue row is untouched and the assistant's own CRUD still works normally.
-    rows = _builtin_rows(builtins_test_project)
+    rows = _builtin_rows()
     assert rows["[test] arxiv-search"]["content"] == (
-        _ENTRIES["test/arxiv-search"]["content"]
+        test_entries["test/arxiv-search"]["content"]
     )
     outcome = gm.add_guidance(title="mine", content="my own entry")
     own_id = outcome["details"]["guidance_id"]
     gm.update_guidance(guidance_id=own_id, content="my updated entry")
     gm.delete_guidance(guidance_id=own_id)
+    assert db.query("SELECT 1 FROM guidance") == []

@@ -92,16 +92,6 @@ class TestBlockingWithOtherFlags:
 
         assert result.exit_code == 0
 
-    def test_with_tags(self, runner):
-        """Script with --tags should tag and block."""
-        result = runner.run(
-            "--tags",
-            "my-tag",
-            runner.fixture_path("test_always_pass.py"),
-        )
-
-        assert result.exit_code == 0
-
 
 class TestDefaultModeWithOtherFlags:
     """Tests combining default per-test mode with other flags."""
@@ -156,17 +146,6 @@ class TestDefaultModeWithOtherFlags:
         assert (
             len(result.sessions_created) == 3
         ), f"Expected 3 sessions, got {len(result.sessions_created)}"
-
-    def test_default_with_tags(self, runner):
-        """Default mode with --tags should work."""
-        result = runner.run(
-            "--tags",
-            "default-mode-tag",
-            runner.fixture_path("test_always_pass.py"),
-            wait_for_completion=True,
-        )
-
-        assert len(result.sessions_created) == 3
 
     def test_default_with_env(self, runner):
         """Default mode with --env should pass env to each test session."""
@@ -285,16 +264,6 @@ class TestTripleCombinations:
 
         assert result.exit_code == 0
 
-    def test_tags_combo(self, runner):
-        """--tags should work with blocking."""
-        result = runner.run(
-            "--tags",
-            "triple-combo",
-            runner.fixture_path("test_always_pass.py"),
-        )
-
-        assert result.exit_code == 0
-
     def test_env_combo(self, runner):
         """--env should work with blocking."""
         result = runner.run(
@@ -346,18 +315,6 @@ class TestQuadrupleCombinations:
         # test_single_test.py has 1 test, repeated 2 times
         assert result.exit_code == 0
 
-    def test_eval_only_tags(self, runner):
-        """--eval-only + --tags should work together."""
-        # Use specific file instead of whole directory to avoid slow collection
-        result = runner.run(
-            "--eval-only",
-            "--tags",
-            "quad-combo",
-            runner.fixture_path("test_eval_marked.py"),
-        )
-
-        assert result.exit_code == 0
-
     def test_symbolic_only_env(self, runner):
         """--symbolic-only + --env should work together."""
         result = runner.run(
@@ -365,62 +322,6 @@ class TestQuadrupleCombinations:
             "--env",
             "QUAD_VAR=value",
             runner.fixture_path("test_symbolic_only.py"),
-        )
-
-        assert result.exit_code == 0
-
-    def test_repeat_tags(self, runner):
-        """--repeat + --tags should work together."""
-        result = runner.run(
-            "--repeat",
-            "2",
-            "--tags",
-            "repeat-tag",
-            runner.fixture_path("test_single_test.py"),
-        )
-
-        assert result.exit_code == 0
-
-    def test_env_tags(self, runner):
-        """--env + --tags should work together."""
-        result = runner.run(
-            "--env",
-            "ENV_VAR=value",
-            "--tags",
-            "env-tag",
-            runner.fixture_path("test_always_pass.py"),
-        )
-
-        assert result.exit_code == 0
-
-
-class TestFiveFlagCombinations:
-    """Tests with five flags combined."""
-
-    def test_repeat_env_tags(self, runner):
-        """--repeat + --env + --tags should all work together."""
-        result = runner.run(
-            "--repeat",
-            "2",
-            "--env",
-            "FULL_VAR=value",
-            "--tags",
-            "full-tag",
-            runner.fixture_path("test_single_test.py"),
-        )
-
-        assert result.exit_code == 0
-
-    def test_match_repeat_tags(self, runner, fixtures_dir):
-        """--match + --repeat + --tags should all work together."""
-        result = runner.run(
-            "--match",
-            "*single*",
-            "--repeat",
-            "2",
-            "--tags",
-            "match-repeat",
-            fixtures_dir,
         )
 
         assert result.exit_code == 0

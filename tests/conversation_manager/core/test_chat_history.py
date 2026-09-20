@@ -3,8 +3,8 @@ tests/conversation_manager/core/test_chat_history.py
 ====================================================
 
 Symbolic tests for ``ChatHistory``: the conversation lives in memory and is
-mirrored, one row per message, to the ``Chat/Messages`` table so it survives
-a restart.
+mirrored, one row per message, to the ``messages`` table so it survives a
+restart.
 """
 
 from __future__ import annotations
@@ -19,6 +19,15 @@ _BASE = datetime(2025, 6, 13, 12, 0, 0, tzinfo=timezone.utc)
 
 def _at(minutes: int) -> datetime:
     return _BASE + timedelta(minutes=minutes)
+
+
+def _stored() -> list[dict]:
+    rows = db.query(
+        "SELECT id, role, content, timestamp, attachments FROM messages ORDER BY id",
+    )
+    for row in rows:
+        row["attachments"] = db.loads(row["attachments"])
+    return rows
 
 
 class TestInMemory:
@@ -71,16 +80,17 @@ class TestPersistence:
         history = ChatHistory()
         held = history.append(role="user", content="before bind", timestamp=_at(0))
 
-        ctx = history.bind()
+        history.bind()
 
         assert history.is_bound
         assert held.row_id is not None
-        rows = db.get_logs(context=ctx)
-        assert [row.entries["content"] for row in rows] == ["before bind"]
+        rows = _stored()
+        assert [row["content"] for row in rows] == ["before bind"]
+        assert rows[0]["id"] == held.row_id
 
     def test_append_after_bind_persists_immediately(self):
         history = ChatHistory()
-        ctx = history.bind()
+        history.bind()
 
         history.append(
             role="assistant",
@@ -89,11 +99,11 @@ class TestPersistence:
             timestamp=_at(1),
         )
 
-        (row,) = db.get_logs(context=ctx)
-        assert row.entries["role"] == "assistant"
-        assert row.entries["content"] == "reply"
-        assert row.entries["attachments"] == ["Outputs/chart.png"]
-        assert datetime.fromisoformat(row.entries["timestamp"]) == _at(1)
+        (row,) = _stored()
+        assert row["role"] == "assistant"
+        assert row["content"] == "reply"
+        assert row["attachments"] == ["Outputs/chart.png"]
+        assert datetime.fromisoformat(row["timestamp"]) == _at(1)
 
     def test_load_restores_a_previous_session_in_order(self):
         earlier = ChatHistory()

@@ -34,7 +34,7 @@ async def resilience_cm():
 
     reset_event_broker()
 
-    cm = await start_async(project_name="TestInitResilience")
+    cm = await start_async()
 
     yield cm
 
@@ -84,32 +84,3 @@ class TestDegradableStepResilience:
             await _init(cm, "resilience_guidance", actor=actor)
 
         assert cm.initialized is True
-
-
-class TestContextRegistryResilience:
-    """Individual context creation failures must not crash setup()."""
-
-    def test_partial_context_creation_failure_does_not_raise(self):
-        """ContextRegistry.setup() tolerates individual context creation errors."""
-        from unify.common.context_registry import ContextRegistry
-
-        original = ContextRegistry._create_context_wrapper
-
-        call_count = 0
-
-        @classmethod
-        def _flaky(cls, manager_name, entry):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                raise ConnectionError("transient network failure")
-            return original.__func__(cls, manager_name, entry)
-
-        ContextRegistry._setup_complete = False
-        try:
-            with patch.object(ContextRegistry, "_create_context_wrapper", _flaky):
-                ContextRegistry.setup()
-        finally:
-            ContextRegistry._setup_complete = False
-
-        assert call_count > 1, "Mock was not exercised"

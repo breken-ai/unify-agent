@@ -37,7 +37,7 @@ async def test_filter_return_callable_injects_dependency_chain():
 
     ns = create_base_globals()
     callables = fm.filter_functions(
-        filter="name == 'a'",
+        filter="name = 'a'",
         limit=1,
         _return_callable=True,
         _namespace=ns,
@@ -76,7 +76,7 @@ async def test_dependency_injection_supports_indirect_calls_and_returned_functio
 
     ns = create_base_globals()
     callables = fm.filter_functions(
-        filter="name == 'use'",
+        filter="name = 'use'",
         limit=1,
         _return_callable=True,
         _namespace=ns,
@@ -98,7 +98,7 @@ def test_search_return_callable_also_returns_metadata():
 
     ns = create_base_globals()
     res = fm.filter_functions(
-        filter="name == 'add_numbers'",
+        filter="name = 'add_numbers'",
         limit=1,
         _return_callable=True,
         _namespace=ns,
@@ -130,7 +130,7 @@ def test_fresh_namespace_does_not_shadow_builtin_annotation_names():
 
     ns: dict = {}
     res = fm.filter_functions(
-        filter="name == 'tick'",
+        filter="name = 'tick'",
         limit=1,
         _return_callable=True,
         _namespace=ns,
@@ -155,7 +155,7 @@ def test_circular_dependency_injection_does_not_loop():
 
     ns = create_base_globals()
     callables = fm.filter_functions(
-        filter="name == 'a'",
+        filter="name = 'a'",
         limit=1,
         _return_callable=True,
         _namespace=ns,
@@ -188,7 +188,7 @@ async def test_filter_return_callable_with_dependencies_executes():
 
     ns = create_base_globals()
     callables = fm.filter_functions(
-        filter="name == 'parse_version'",
+        filter="name = 'parse_version'",
         limit=1,
         _return_callable=True,
         _namespace=ns,
@@ -204,29 +204,19 @@ async def test_filter_return_callable_with_dependencies_executes():
 
 @_handle_project
 @pytest.mark.asyncio
-async def test_similarity_search_return_callable_monkeypatched(monkeypatch):
-    fm = FunctionManager()
-
-    fake_record = {
-        "name": "foo",
-        "argspec": "(x: int) -> int",
-        "docstring": "Add one.",
-        "implementation": "async def foo(x: int) -> int:\n    return x + 1\n",
-        "calls": [],
-        "is_primitive": False,
-    }
-
-    def _fake_text_search(contexts, references, **kwargs):
-        return [dict(fake_record)]
-
-    monkeypatch.setattr(
-        "unify.function_manager.function_manager.federated_text_search",
-        _fake_text_search,
+async def test_search_return_callable_with_metadata():
+    fm = FunctionManager(include_primitives=False)
+    fm.add_functions(
+        implementations=(
+            "async def foo(x: int) -> int:\n"
+            '    """Add one."""\n'
+            "    return x + 1\n"
+        ),
     )
 
     ns = create_base_globals()
     res = fm.search_functions(
-        query="irrelevant",
+        query="add one",
         n=1,
         _return_callable=True,
         _namespace=ns,
@@ -236,7 +226,7 @@ async def test_similarity_search_return_callable_monkeypatched(monkeypatch):
     assert isinstance(res, dict)
     assert set(res.keys()) == {"callables", "metadata"}
     assert len(res["callables"]) == 1
-    assert len(res["metadata"]) == 1
+    assert [row["name"] for row in res["metadata"]] == ["foo"]
 
     fn = res["callables"][0]
     assert callable(fn)
@@ -294,7 +284,7 @@ async def test_dependency_injection_supports_user_defined_forward_ref_string_ann
     ns["MetricResult"] = MetricResult
 
     callables = fm.filter_functions(
-        filter="name == 'metric'",
+        filter="name = 'metric'",
         limit=1,
         _return_callable=True,
         _namespace=ns,
@@ -312,9 +302,7 @@ async def test_dependency_injection_supports_user_defined_forward_ref_string_ann
 
 @_handle_project
 @pytest.mark.asyncio
-async def test_similarity_search_return_callable_forward_ref_annotations_just_work(
-    monkeypatch,
-):
+async def test_search_return_callable_forward_ref_annotations_just_work():
     """
     Validate the CodeActActor-style flow:
       fm.search_functions(..., return_callable=True)
@@ -323,13 +311,9 @@ async def test_similarity_search_return_callable_forward_ref_annotations_just_wo
     GroupBy/TimePeriod/MetricResult), and the returned callable should still
     be able to resolve forward-ref annotations without NameError.
     """
-    fm = FunctionManager()
-
-    fake_record = {
-        "name": "metric",
-        "argspec": "(...)",
-        "docstring": "Metric query.",
-        "implementation": (
+    fm = FunctionManager(include_primitives=False)
+    fm.add_functions(
+        implementations=(
             "async def metric(\n"
             "    group_by: 'Optional[GroupBy | str]' = None,\n"
             "    start_date: 'Optional[str]' = None,\n"
@@ -337,28 +321,18 @@ async def test_similarity_search_return_callable_forward_ref_annotations_just_wo
             "    time_period: 'TimePeriod' = 'day',\n"
             "    include_plots: 'bool' = False,\n"
             ") -> 'MetricResult':\n"
+            '    """Metric query."""\n'
             "    hints = typing.get_type_hints(metric, include_extras=True)\n"
             "    group_by_str = str(hints['group_by'])\n"
             "    tp = hints['time_period']\n"
             "    ret = hints['return']\n"
             "    return (group_by_str, tp.__name__, ret.__name__)\n"
         ),
-        # No dependency graph info available from search in this test.
-        "calls": [],
-        "is_primitive": False,
-    }
-
-    def _fake_text_search(contexts, references, **kwargs):
-        return [dict(fake_record)]
-
-    monkeypatch.setattr(
-        "unify.function_manager.function_manager.federated_text_search",
-        _fake_text_search,
     )
 
     ns = create_base_globals()
     res = fm.search_functions(
-        query="irrelevant",
+        query="metric query",
         n=1,
         _return_callable=True,
         _namespace=ns,
@@ -394,7 +368,7 @@ async def test_dep_added_after_root_does_not_backfill_depends_on():
 
     ns = create_base_globals()
     callables = fm.filter_functions(
-        filter="name == 'a'",
+        filter="name = 'a'",
         limit=1,
         _return_callable=True,
         _namespace=ns,
@@ -408,7 +382,7 @@ async def test_dep_added_after_root_does_not_backfill_depends_on():
 
     ns2 = create_base_globals()
     callables2 = fm.filter_functions(
-        filter="name == 'a'",
+        filter="name = 'a'",
         limit=1,
         _return_callable=True,
         _namespace=ns2,

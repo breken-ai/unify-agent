@@ -1,7 +1,7 @@
 """
 Tests for the ``filter_scope`` constructor parameter on ``FunctionManager``.
 
-A ``filter_scope`` is a Python boolean expression that is automatically ANDed
+A ``filter_scope`` is a SQL ``WHERE`` clause that is automatically ANDed
 onto every read query (``list_functions``, ``filter_functions``,
 ``search_functions``, ``get_precondition``).  Write paths are unaffected.
 """
@@ -46,7 +46,7 @@ def test_filter_scope_filters_list_functions():
     assert set(fm_all.list_functions().keys()) == {"alpha", "beta", "hello_world"}
 
     # Scoped away from hello_world – should exclude it
-    fm_py = _FM(filter_scope="name != 'hello_world'")
+    fm_py = _FM(filter_scope="name <> 'hello_world'")
     listing = fm_py.list_functions()
     assert "alpha" in listing
     assert "beta" in listing
@@ -67,7 +67,7 @@ def test_entrypoint_id_catalogue_ignores_runtime_discovery_scope():
     all_ids = fm_all.list_function_name_to_ids()
 
     fm_scoped = _FM(
-        filter_scope="name != 'hello_world'",
+        filter_scope="name <> 'hello_world'",
         exclude_compositional_ids={all_ids["alpha"], all_ids["hello_world"]},
     )
 
@@ -87,7 +87,7 @@ def test_filter_scope_filters_filter_functions_no_caller_filter():
     fm.add_functions(implementations=[_PY_ALPHA, _PY_BETA])
     fm.add_functions(implementations=_PY_HELLO)
 
-    fm_py = _FM(filter_scope="name != 'hello_world'")
+    fm_py = _FM(filter_scope="name <> 'hello_world'")
     hits = fm_py.filter_functions()
     names = {h["name"] for h in hits}
     assert "alpha" in names
@@ -102,8 +102,8 @@ def test_filter_scope_composes_with_caller_filter():
     fm.add_functions(implementations=[_PY_ALPHA, _PY_BETA])
     fm.add_functions(implementations=_PY_HELLO)
 
-    fm_py = _FM(filter_scope="name != 'hello_world'")
-    hits = fm_py.filter_functions(filter="'double' in docstring")
+    fm_py = _FM(filter_scope="name <> 'hello_world'")
+    hits = fm_py.filter_functions(filter="docstring LIKE '%double%'")
     names = {h["name"] for h in hits}
     # Only alpha has 'double' in its docstring AND is in scope
     assert names == {"alpha"}
@@ -121,7 +121,7 @@ def test_filter_scope_filters_search_functions():
     fm.add_functions(implementations=[_PY_ALPHA, _PY_BETA])
     fm.add_functions(implementations=_PY_HELLO)
 
-    fm_py = _FM(filter_scope="name != 'hello_world'")
+    fm_py = _FM(filter_scope="name <> 'hello_world'")
     hits = fm_py.search_functions(query="hello world", n=10)
     for h in hits:
         assert (
@@ -147,7 +147,7 @@ def test_filter_scope_filters_get_precondition():
     assert fm.get_precondition(function_name="hello_world") is not None
 
     # Scoped away from hello_world – it is invisible
-    fm_py = _FM(filter_scope="name != 'hello_world'")
+    fm_py = _FM(filter_scope="name <> 'hello_world'")
     assert fm_py.get_precondition(function_name="hello_world") is None
 
 
@@ -175,7 +175,7 @@ def test_filter_scope_none_is_unscoped():
 @_handle_project
 def test_filter_scope_does_not_affect_writes():
     """A scoped instance can still add functions outside its own scope."""
-    fm_py = _FM(filter_scope="name != 'hello_world'")
+    fm_py = _FM(filter_scope="name <> 'hello_world'")
     # Add an out-of-scope function through the scoped instance
     result = fm_py.add_functions(implementations=_PY_HELLO)
     assert result == {"hello_world": "added"}
@@ -200,8 +200,8 @@ def test_two_scoped_instances_see_different_subsets():
     fm.add_functions(implementations=[_PY_ALPHA, _PY_BETA])
     fm.add_functions(implementations=_PY_HELLO)
 
-    fm_math = _FM(filter_scope="name != 'hello_world'")
-    fm_hello = _FM(filter_scope="name == 'hello_world'")
+    fm_math = _FM(filter_scope="name <> 'hello_world'")
+    fm_hello = _FM(filter_scope="name = 'hello_world'")
 
     math_names = set(fm_math.list_functions().keys())
     hello_names = set(fm_hello.list_functions().keys())

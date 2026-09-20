@@ -88,7 +88,7 @@ def _resolve_parent_environments(
 def _build_scoped_fm(
     discovery_scope: str | None,
 ) -> "FunctionManager":
-    """Build a fresh FunctionManager with an optional discovery filter.
+    """Build a fresh FunctionManager with an optional discovery clause.
 
     Constructs a FunctionManager with the canonical role-gated primitive scope.
     If *discovery_scope* is provided it is applied as the ``filter_scope``
@@ -152,9 +152,9 @@ def _resolve_prompt_guidance(
     resolved_ids: set[int] = set()
     for identifier in prompt_guidance:
         if isinstance(identifier, int):
-            rows = gm.filter(filter=f"guidance_id == {identifier}", limit=1)
+            rows = gm.filter(filter=f"guidance_id = {int(identifier)}", limit=1)
         else:
-            rows = gm.filter(filter=f"title == '{identifier}'", limit=1)
+            rows = gm.filter(filter=f"title = '{identifier}'", limit=1)
         # Explicitly pinned guidance is injected with its complete content;
         # list reads only carry previews, so re-fetch each match in full.
         rows = [gm.get_guidance(guidance_id=g.guidance_id) for g in rows]
@@ -381,10 +381,9 @@ class _ActorRunner:
             on GuidanceManager discovery tools (subject to
             ``guidance_scope``).
         guidance_scope : str, optional
-            A boolean filter expression that restricts which guidance
-            entries the actor can discover via GuidanceManager
-            search/filter (e.g., ``"'financial' in title"`` or
-            ``"guidance_id < 100"``).
+            A SQL ``WHERE`` clause that restricts which guidance entries the
+            actor can discover via GuidanceManager search/filter (e.g.
+            ``"title LIKE '%financial%'"`` or ``"guidance_id < 100"``).
 
             Mirrors ``discovery_scope`` for functions.  When provided,
             only guidance matching this expression is visible to the
@@ -431,10 +430,9 @@ class _ActorRunner:
             When omitted, the actor receives no prompt-injected
             functions and relies entirely on FunctionManager discovery.
         discovery_scope : str, optional
-            A boolean filter expression that restricts which functions
-            the actor can discover via FunctionManager
-            search/list/filter (e.g., ``"'data' in docstring"`` or
-            ``"name.startswith('report_')"``).
+            A SQL ``WHERE`` clause that restricts which stored functions the
+            actor can discover via FunctionManager search/list/filter (e.g.
+            ``"docstring LIKE '%data%'"`` or ``"name LIKE 'report_%'"``).
 
             When provided, only functions matching this expression are
             visible to the actor's discovery tools.  When omitted, all

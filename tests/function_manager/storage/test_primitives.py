@@ -1,18 +1,18 @@
 """
 Tests for action primitives in FunctionManager.
 
-Tests the primitives registry, the global builtins catalogue reads, and
-text search that includes both user-defined functions and action
-primitives.
+Tests the primitives registry, the seeded ``primitives`` table, and text
+search that includes both user-defined functions and action primitives.
 
-Static primitives are stored once platform-wide in the public-read
-builtins catalogue project with stable hash-based function_id values,
-while user-defined functions live in per-assistant Functions/Compositional
-contexts with auto-incrementing IDs.
+Primitives are seeded into the ``primitives`` table from the registry when a
+FunctionManager is constructed, with stable hash-based function_id values;
+user-defined functions live in the ``functions`` table with auto-incrementing
+ids. The two are read together through the ``all_functions`` view.
 """
 
 import pytest
 
+from unify import db
 from unify.function_manager.function_manager import FunctionManager
 from unify.function_manager.primitives import (
     Primitives,
@@ -20,7 +20,6 @@ from unify.function_manager.primitives import (
     get_primitive_callable,
     get_registry,
 )
-from unify.common.context_registry import ContextRegistry
 from tests.helpers import _handle_project
 
 _ACTOR_ACT = "primitives.actor.act"
@@ -33,19 +32,10 @@ _ACTOR_CLASS_PATH = "unify.actor.environments.actor._ActorRunner"
 
 @pytest.fixture
 def function_manager_factory():
-    """
-    Factory fixture that creates FunctionManager instances.
-
-    Returns a callable that creates a FunctionManager. This ensures the
-    FunctionManager is instantiated AFTER @_handle_project sets up the
-    test-specific context, providing proper isolation for parallel tests.
-    """
+    """Factory fixture that creates FunctionManager instances."""
     managers = []
 
     def _create():
-        # Forget FunctionManager's cached contexts to ensure we get
-        # fresh contexts for this test's active context (set by @_handle_project)
-        ContextRegistry.forget(FunctionManager, "Functions/Compositional")
         fm = FunctionManager()
         managers.append(fm)
         return fm
@@ -175,30 +165,53 @@ def test_compute_primitives_hash_changes_on_modification():
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# 2. Builtins catalogue read tests
+# 2. Seeded primitives table
 # ────────────────────────────────────────────────────────────────────────────
 
 
 @_handle_project
-def test_list_primitives_reads_builtins_catalog(function_manager_factory):
-    """list_primitives() should read static rows from the global catalogue."""
+def test_constructing_a_manager_seeds_primitives_table(function_manager_factory):
+    """FunctionManager() makes the ``primitives`` table equal to the registry."""
+    function_manager_factory()
+
+    rows = db.query(
+        "SELECT function_id, name, primitive_class, primitive_method FROM primitives",
+    )
+    expected = get_registry().collect_primitives(PrimitiveScope.all_managers())
+    assert {row["name"] for row in rows} == set(expected)
+    for row in rows:
+        registry_row = expected[row["name"]]
+        assert row["function_id"] == registry_row["function_id"]
+        assert row["primitive_class"] == registry_row["primitive_class"]
+        assert row["primitive_method"] == registry_row["primitive_method"]
+
+
+@_handle_project
+def test_constructing_two_managers_does_not_duplicate_rows(function_manager_factory):
+    """The seed converges: a second manager leaves exactly one row per primitive."""
+    function_manager_factory()
+    function_manager_factory()
+
+    rows = db.query("SELECT name, COUNT(*) AS n FROM primitives GROUP BY name")
+    assert rows
+    assert all(row["n"] == 1 for row in rows)
+    assert {row["name"] for row in rows} == set(
+        get_registry().collect_primitives(PrimitiveScope.all_managers()),
+    )
+
+
+@_handle_project
+def test_list_primitives_reads_primitives_table(function_manager_factory):
+    """list_primitives() reads the seeded rows."""
     function_manager = function_manager_factory()
 
     primitives = function_manager.list_primitives()
-    assert len(primitives) > 0
-
-    # Verify they have integer function_ids
-    for name, data in primitives.items():
-        assert isinstance(data["function_id"], int)
-
-
-def test_seed_builtin_primitives_is_idempotent():
-    """Re-seeding the already-converged catalogue should be a no-op."""
-    from unify.function_manager.builtins_catalog import seed_builtin_primitives
-
-    # The session-start seeding already converged the catalogue, so this
-    # run must detect matching hashes and write nothing.
-    assert seed_builtin_primitives() is False
+    stored = {
+        row["name"]: row["function_id"]
+        for row in db.query("SELECT name, function_id FROM primitives")
+    }
+    assert primitives
+    assert {name: data["function_id"] for name, data in primitives.items()} == stored
 
 
 @_handle_project
@@ -218,8 +231,8 @@ def test_list_primitives_returns_primitive_metadata(function_manager_factory):
 
 
 @_handle_project
-def test_primitives_have_stable_ids_in_catalog(function_manager_factory):
-    """Catalogue rows should expose the same stable IDs as the registry."""
+def test_primitives_have_stable_ids_in_table(function_manager_factory):
+    """Seeded rows expose the same stable ids as the registry."""
     function_manager = function_manager_factory()
 
     registry = get_registry()
@@ -233,7 +246,7 @@ def test_primitives_have_stable_ids_in_catalog(function_manager_factory):
     assert stored
 
     for name, data in stored.items():
-        assert name in expected, f"Unexpected catalogue primitive {name}"
+        assert name in expected, f"Unexpected seeded primitive {name}"
         assert data["function_id"] == expected[name], (
             f"Primitive {name} ID {data['function_id']} does not match "
             f"registry ID {expected[name]}"
@@ -241,7 +254,7 @@ def test_primitives_have_stable_ids_in_catalog(function_manager_factory):
 
 
 @_handle_project
-def test_catalog_rows_resolve_to_runtime_callables(function_manager_factory):
+def test_seeded_rows_resolve_to_runtime_callables(function_manager_factory):
     """Stored primitive metadata resolves back to the live runtime method."""
     function_manager = function_manager_factory()
     row = function_manager.list_primitives()[_ACTOR_ACT]
@@ -270,7 +283,7 @@ def test_search_includes_primitives_by_default(function_manager_factory):
         n=5,
     )
 
-    # Should have results (primitives get synced automatically)
+    # Should have results (primitives are seeded on construction)
     assert len(results) > 0
 
     # At least one result should be a primitive
@@ -310,17 +323,19 @@ def delegate_subtask(request: str) -> str:
 
 
 @_handle_project
-def test_clear_preserves_builtins_catalog(function_manager_factory):
-    """clear() drops per-assistant state but never the global catalogue."""
+def test_clear_preserves_primitives(function_manager_factory):
+    """clear() drops stored functions but never the seeded primitives."""
     function_manager = function_manager_factory()
+    function_manager.add_functions(implementations="def own():\n    return 1\n")
 
     count_before = len(function_manager.list_primitives())
     assert count_before > 0
 
     function_manager.clear()
 
-    count_after = len(function_manager.list_primitives())
-    assert count_after == count_before
+    assert db.query("SELECT 1 FROM functions") == []
+    assert len(function_manager.list_primitives()) == count_before
+    assert db.query_one("SELECT COUNT(*) AS n FROM primitives")["n"] == count_before
 
 
 # ────────────────────────────────────────────────────────────────────────────

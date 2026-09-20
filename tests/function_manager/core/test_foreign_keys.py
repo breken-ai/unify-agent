@@ -1,13 +1,10 @@
 """
-Foreign Key Tests for FunctionManager
+The function -> guidance link on FunctionManager rows.
 
-Coverage
-========
-✓ guidance_ids[*] → Guidance.guidance_id (nested array FK)
-  - Validation: Reject invalid guidance_ids on function creation
-  - CASCADE: Remove deleted guidance IDs from function.guidance_ids array
-  - CASCADE: Update guidance_id changes in function.guidance_ids array
-  - Array operations: Multiple guidance references, empty arrays
+``guidance_ids`` on a function row is never stored: it is derived at read
+time from every ``guidance`` row whose ``function_ids`` cites the function.
+Creating guidance that cites a function makes the id appear; deleting the
+guidance makes it disappear; nothing has to be cascaded.
 """
 
 from __future__ import annotations
@@ -17,177 +14,117 @@ from tests.helpers import _handle_project
 from unify.function_manager.function_manager import FunctionManager
 from unify.guidance_manager.guidance_manager import GuidanceManager
 
-# --------------------------------------------------------------------------- #
-#  Unit Tests: guidance_ids[*] → Guidance.guidance_id                         #
-# --------------------------------------------------------------------------- #
+
+def _add(fm: FunctionManager, name: str) -> int:
+    fm.add_functions(implementations=f"def {name}():\n    return '{name}'\n")
+    return fm.list_functions()[name]["function_id"]
+
+
+def _guidance_ids(fm: FunctionManager, function_id: int) -> list[int]:
+    return fm._get_log_by_function_id(function_id=function_id)["guidance_ids"]
 
 
 @_handle_project
-def test_fk_guidance_ids_valid_reference():
-    """Test that functions can reference valid guidance IDs."""
+def test_guidance_ids_derived_from_guidance_function_ids():
     gm = GuidanceManager()
     fm = FunctionManager()
+    fid = _add(fm, "setup_demo")
 
-    # Create guidance entries
-    gm.add_guidance(title="Setup Guide", content="How to setup the system")
-    gm.add_guidance(title="Usage Guide", content="How to use the system")
+    g1 = gm.add_guidance(
+        title="Setup Guide",
+        content="How to setup the system",
+        function_ids=[fid],
+    )["details"]["guidance_id"]
+    g2 = gm.add_guidance(
+        title="Usage Guide",
+        content="How to use the system",
+        function_ids=[fid],
+    )["details"]["guidance_id"]
 
-    # Get guidance IDs
-    guidance_list = db.get_logs(context=gm._ctx, from_fields=["guidance_id"])
-    g_ids = sorted([int(g.entries["guidance_id"]) for g in guidance_list])
-    assert len(g_ids) == 2
+    assert _guidance_ids(fm, fid) == sorted([g1, g2])
+    [row] = fm.filter_functions(filter="name = 'setup_demo'")
+    assert row["guidance_ids"] == sorted([g1, g2])
+    assert fm.list_functions()["setup_demo"]["guidance_ids"] == sorted([g1, g2])
 
-    # Create function
-    src = "def setup_demo():\n    return 'demo setup'\n"
-    fm.add_functions(implementations=src)
-
-    # Get the function log
-    func_logs = db.get_logs(
-        context=fm._compositional_ctx,
-        filter="name == 'setup_demo'",
-        return_ids_only=True,
-    )
-    assert func_logs, "Function not created"
-
-    # Update with guidance_ids
-    db.update_logs(
-        context=fm._compositional_ctx,
-        logs=func_logs[0],
-        entries={"guidance_ids": g_ids},
-        overwrite=True,
-    )
-
-    # Verify function was created with guidance_ids
-    funcs = db.get_logs(
-        context=fm._compositional_ctx,
-        from_fields=["function_id", "guidance_ids"],
-    )
-    assert len(funcs) == 1
-    stored_guidance_ids = funcs[0].entries.get("guidance_ids", [])
-    assert sorted(stored_guidance_ids) == g_ids
+    # Nothing is written to the functions table for the link.
+    columns = {col["name"] for col in db.query("PRAGMA table_info(functions)")}
+    assert "guidance_ids" not in columns
 
 
 @_handle_project
-def test_fk_guidance_ids_cascade_on_delete():
-    """Test nested CASCADE: Deleting guidance removes it from function.guidance_ids array."""
+def test_deleting_guidance_removes_it_from_guidance_ids():
     gm = GuidanceManager()
     fm = FunctionManager()
+    fid = _add(fm, "complex_setup")
 
-    # Create guidance entries
-    gm.add_guidance(title="Guide 1", content="Content 1")
-    gm.add_guidance(title="Guide 2", content="Content 2")
-    gm.add_guidance(title="Guide 3", content="Content 3")
-
-    # Get guidance IDs
-    guidance_list = db.get_logs(context=gm._ctx, from_fields=["guidance_id"])
-    g_ids = sorted([int(g.entries["guidance_id"]) for g in guidance_list])
-    assert len(g_ids) == 3
-    g1, g2, g3 = g_ids
-
-    # Create function
-    src = "def complex_setup():\n    return 'setup'\n"
-    fm.add_functions(implementations=src)
-
-    # Get the function log
-    func_logs = db.get_logs(
-        context=fm._compositional_ctx,
-        filter="name == 'complex_setup'",
-        return_ids_only=True,
+    g1, g2, g3 = (
+        gm.add_guidance(title=f"Guide {i}", content=f"Content {i}", function_ids=[fid])[
+            "details"
+        ]["guidance_id"]
+        for i in range(3)
     )
-    assert func_logs, "Function not created"
+    assert _guidance_ids(fm, fid) == [g1, g2, g3]
 
-    # Update with guidance_ids
-    db.update_logs(
-        context=fm._compositional_ctx,
-        logs=func_logs[0],
-        entries={"guidance_ids": [g1, g2, g3]},
-        overwrite=True,
-    )
-
-    # Verify function has all three guidance_ids
-    funcs = db.get_logs(
-        context=fm._compositional_ctx,
-        from_fields=["function_id", "guidance_ids"],
-    )
-    assert len(funcs) == 1
-    assert sorted(funcs[0].entries["guidance_ids"]) == [g1, g2, g3]
-
-    # Delete the middle guidance entry (g2)
     gm.delete_guidance(guidance_id=g2)
 
-    # Verify g2 was removed from function.guidance_ids (CASCADE behavior)
-    funcs_after = db.get_logs(
-        context=fm._compositional_ctx,
-        from_fields=["function_id", "guidance_ids"],
-    )
-    assert len(funcs_after) == 1
-    remaining_ids = sorted(funcs_after[0].entries.get("guidance_ids", []))
-    assert remaining_ids == [g1, g3]  # g2 should be removed
-    assert g2 not in remaining_ids
+    assert _guidance_ids(fm, fid) == [g1, g3]
 
 
 @_handle_project
-def test_fk_guidance_ids_empty_array():
-    """Test that empty guidance_ids array is valid."""
+def test_function_without_citations_has_empty_guidance_ids():
     fm = FunctionManager()
+    fid = _add(fm, "standalone")
 
-    # Create function with no guidance references (defaults to empty array)
-    src = "def standalone():\n    return 'standalone'\n"
-    fm.add_functions(implementations=src)
-
-    # Verify function was created with empty guidance_ids
-    funcs = db.get_logs(
-        context=fm._compositional_ctx,
-        from_fields=["function_id", "guidance_ids"],
-    )
-    assert len(funcs) == 1
-    assert funcs[0].entries.get("guidance_ids", []) == []
+    assert _guidance_ids(fm, fid) == []
+    [row] = fm.filter_functions(filter="name = 'standalone'")
+    assert row["guidance_ids"] == []
 
 
 @_handle_project
-def test_fk_guidance_ids_multiple_deletes():
-    """Test nested CASCADE with multiple sequential deletes."""
+def test_guidance_ids_track_sequential_deletes():
     gm = GuidanceManager()
     fm = FunctionManager()
+    fid = _add(fm, "mega_func")
 
-    # Create multiple guidance entries
-    for i in range(5):
-        gm.add_guidance(title=f"Guide {i}", content=f"Content {i}")
+    g_ids = [
+        gm.add_guidance(title=f"Guide {i}", content=f"Content {i}", function_ids=[fid])[
+            "details"
+        ]["guidance_id"]
+        for i in range(5)
+    ]
+    assert _guidance_ids(fm, fid) == g_ids
 
-    # Get all guidance IDs
-    guidance_list = db.get_logs(context=gm._ctx, from_fields=["guidance_id"])
-    g_ids = sorted([int(g.entries["guidance_id"]) for g in guidance_list])
-    assert len(g_ids) == 5
-
-    # Create function
-    src = "def mega_func():\n    return 'mega'\n"
-    fm.add_functions(implementations=src)
-
-    # Get the function log
-    func_logs = db.get_logs(
-        context=fm._compositional_ctx,
-        filter="name == 'mega_func'",
-        return_ids_only=True,
-    )
-    assert func_logs, "Function not created"
-
-    # Update with guidance_ids
-    db.update_logs(
-        context=fm._compositional_ctx,
-        logs=func_logs[0],
-        entries={"guidance_ids": g_ids},
-        overwrite=True,
-    )
-
-    # Delete guidance entries one by one
-    for gid in g_ids[:3]:  # Delete first 3
+    for gid in g_ids[:3]:
         gm.delete_guidance(guidance_id=gid)
 
-    # Verify only last 2 remain in function.guidance_ids
-    funcs = db.get_logs(
-        context=fm._compositional_ctx,
-        from_fields=["function_id", "guidance_ids"],
-    )
-    assert len(funcs) == 1
-    remaining = sorted(funcs[0].entries.get("guidance_ids", []))
-    assert remaining == g_ids[3:]  # Only last 2 should remain
+    assert _guidance_ids(fm, fid) == g_ids[3:]
+
+
+@_handle_project
+def test_updating_guidance_function_ids_relinks():
+    gm = GuidanceManager()
+    fm = FunctionManager()
+    first = _add(fm, "first")
+    second = _add(fm, "second")
+
+    gid = gm.add_guidance(
+        title="Guide",
+        content="Cites first.",
+        function_ids=[first],
+    )[
+        "details"
+    ]["guidance_id"]
+    assert _guidance_ids(fm, first) == [gid]
+    assert _guidance_ids(fm, second) == []
+
+    gm.update_guidance(guidance_id=gid, function_ids=[second])
+
+    assert _guidance_ids(fm, first) == []
+    assert _guidance_ids(fm, second) == [gid]
+
+
+@_handle_project
+def test_primitive_rows_never_carry_guidance_ids():
+    fm = FunctionManager()
+    for row in fm.filter_functions(filter="is_primitive = 1"):
+        assert row["guidance_ids"] == []

@@ -31,7 +31,7 @@ CodeActActor ── one Python program per turn in a persistent sandbox ──�
 └───────────────────────────────────────────────────────┘
  │
  ▼
-unify.db ── one SQLite file: projects, contexts, rows, derived columns
+unify.db ── one SQLite file: functions, primitives, guidance, builtin_guidance, messages
 ```
 
 Steering propagates through the full tree: stopping the Actor stops its nested loops; interjecting into the ConversationManager can reach a deeply nested in-flight tool loop.
@@ -235,9 +235,9 @@ Each library follows the same pattern:
 
 3. A **simulated implementation** with the same signatures, used by tests that exercise the actor's routing without paying for the real library.
 
-**FunctionManager** — Stored Python functions with metadata and pip dependencies, run in-process. Dependencies live in one workspace environment under `UNIFY_HOME`, installed once and kept. Also the read-only builtins catalogue of every primitive the Actor can call.
+**FunctionManager** — Stored Python functions with metadata and pip dependencies, run in-process. Dependencies live in one workspace environment under `UNIFY_HOME`, installed once and kept. Also the read-only `primitives` table of every primitive the Actor can call, seeded from the primitive registry.
 
-**GuidanceManager** — Procedures: step-by-step instructions, walkthroughs, and strategies for composing functions. Linked to functions by id, so a rule change finds every implementation that embeds it. Reads federate over a global builtins catalogue of imported Agent Skills.
+**GuidanceManager** — Procedures: step-by-step instructions, walkthroughs, and strategies for composing functions. Linked to functions by id, so a rule change finds every implementation that embeds it. Reads also cover the read-only `builtin_guidance` table of imported Agent Skills, seeded from a committed snapshot.
 
 ---
 
@@ -263,16 +263,23 @@ The ConversationManager uses a `Debouncer` that coalesces rapid-fire events (new
 
 ## The local store
 
-**Files:** `unify/db/engine.py`, `unify/db/expressions.py`
+**File:** `unify/db.py`
 
-`unify.db` is an in-process SQLite engine with the shape of a document store:
+`unify.db` is one SQLite file under `UNIFY_HOME` (`store.sqlite`, or `UNIFY_STORE_PATH`) with five tables and two views:
 
-- **Projects** hold **contexts** (tables), and contexts hold **rows** of JSON with typed **fields**.
-- A context can declare **unique keys**, **auto-counted ids**, **foreign keys** (with `CASCADE` / `SET NULL` propagation through scalar, list and nested-list references) and **derived columns** whose equations are evaluated on every write.
-- **Filters and sort keys** are Python expressions evaluated per row by an AST walker (never `eval`), with SQL-style `None` propagation and builtins such as `exists` and `now`.
-- **Commits** snapshot a context or a whole project and can be rolled back, which is what the test fixtures use to reset scenarios.
+| Table | Holds | Written by |
+|---|---|---|
+| `functions` | the assistant's stored functions | `FunctionManager` |
+| `primitives` | every primitive the Actor can call, with stable hash-based ids | seeded from the primitive registry when a `FunctionManager` is constructed |
+| `guidance` | the assistant's procedures | `GuidanceManager` |
+| `builtin_guidance` | imported Agent Skills, with stable hash-based ids | seeded from `unify/guidance_manager/builtins_guidance.json` when a `GuidanceManager` is constructed |
+| `messages` | the chat history | `ChatHistory` |
 
-The public API (`db.get_logs`, `db.create_logs`, `db.update_logs`, `db.create_context`, …) is what every component reads and writes through, and the whole assistant is one file under `UNIFY_HOME`.
+The views `all_functions` (with an `is_primitive` column) and `all_guidance` (`is_builtin`) union each catalogue with its seeded rows, so one clause addresses both populations while the assistant's own ids stay small and auto-incrementing. List and dict columns hold JSON text and are queried with `json_each`.
+
+Managers write plain SQL through `db.execute`, `db.query` and `db.query_one`; `db.transaction()` nests, with inner uses joining the outermost transaction. Every filter the model writes (`FunctionManager_filter_functions`, `GuidanceManager_filter`, a nested actor's `discovery_scope` / `guidance_scope`) and every manager's `filter_scope` is a SQL `WHERE` clause over one of the views. They are composed with `AND` and run through `db.query_readonly`, whose authorizer refuses anything other than a read, so a clause can only read. A clause SQLite rejects comes back to the model as an `invalid_filter` tool error naming the columns it may use. Skill search fetches the candidate rows with SQL and ranks them in Python by plain word match (`unify/common/text_search.py`).
+
+`db.clear()` empties the assistant's own tables and restarts their id sequences, leaving the seeded catalogues in place; the test fixtures call it before every test.
 
 ---
 
@@ -378,9 +385,7 @@ unify/
 ├── unify/
 │   ├── cli.py                          # Terminal chat, `python -m unify`
 │   ├── workspace.py                    # The assistant's working directory
-│   ├── db/
-│   │   ├── engine.py                   # The store: contexts, rows, derived columns, commits
-│   │   └── expressions.py              # The row expression language
+│   ├── db.py                           # The store: five tables, two views, read-only path for model SQL
 │   ├── common/
 │   │   ├── async_tool_loop.py          # SteerableToolHandle, start_async_tool_loop
 │   │   └── _async_tool/

@@ -12,7 +12,7 @@ def _manager(**kwargs) -> FunctionManager:
 
 
 @_handle_project
-def test_delete_function_marks_guidance_before_fk_cascade():
+def test_delete_function_unlinks_and_marks_guidance():
     fm = _manager()
     gm = GuidanceManager()
     fm.add_functions(implementations="def helper():\n    return 1\n")
@@ -129,25 +129,21 @@ def test_guidance_reconcile_clears_resolved_function_reason():
         function_ids=[function_id],
     )
     guidance_id = outcome["details"]["guidance_id"]
-    log = db.get_logs(
-        context=gm._ctx,
-        filter=f"guidance_id == {guidance_id}",
-        limit=1,
-    )[0]
-    db.update_logs(
-        context=gm._ctx,
-        logs=[log.id],
-        entries={
-            "stale_reasons": [
-                {
-                    "dep_kind": "function",
-                    "id": function_id,
-                    "name": "helper",
-                    "message": "missing helper",
-                },
-            ],
-        },
-        overwrite=True,
+    db.execute(
+        "UPDATE guidance SET stale_reasons = ? WHERE guidance_id = ?",
+        (
+            db.dumps(
+                [
+                    {
+                        "dep_kind": "function",
+                        "id": function_id,
+                        "name": "helper",
+                        "message": "missing helper",
+                    },
+                ],
+            ),
+            guidance_id,
+        ),
     )
 
     result = gm.reconcile_dependencies(guidance_ids=[guidance_id])
