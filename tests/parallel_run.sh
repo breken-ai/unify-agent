@@ -503,12 +503,9 @@ run_cmd() {
   env_exports="$env_exports $(printf 'UNIFY_STORE_PATH=%q' "$(resolve_store_path "$session_name")")"
   # Append user-provided --env overrides plus the socket/log-dir/OTEL exports
   env_exports="$env_exports$(build_env_exports)"
-  # Build pytest command with optional marker filter, scenario overwrite, and extra args
+  # Build pytest command with optional marker filter and extra args
   local pytest_cmd
   local extra_args=""
-  if (( OVERWRITE_SCENARIOS )); then
-    extra_args="--overwrite-scenarios"
-  fi
   # Append any extra pytest args passed via --
   if (( ${#PYTEST_EXTRA_ARGS[@]} > 0 )); then
     for arg in "${PYTEST_EXTRA_ARGS[@]}"; do

@@ -270,18 +270,6 @@ def _exact_cache_keying_for_evals(request):
 
 def pytest_addoption(parser):
     parser.addoption(
-        "--unify-stub",
-        action="store_true",
-        help="Use an in-memory stub for unite.log / projects whilst "
-        "leaving LLM calls intact.",
-    )
-    parser.addoption(
-        "--overwrite-scenarios",
-        action="store_true",
-        default=False,
-        help="Delete and recreate all test scenarios from scratch.",
-    )
-    parser.addoption(
         "--test-tags",
         action="store",
         default="",
