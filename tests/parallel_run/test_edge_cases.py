@@ -154,14 +154,6 @@ class TestArgumentErrors:
 
         assert result.exit_code != 0
 
-    def test_tags_without_value(self, runner):
-        """--tags without value should error."""
-        result = runner.run(
-            "--tags",
-        )
-
-        assert result.exit_code != 0 or "Error" in result.stderr
-
 
 class TestEmptyResults:
     """Tests for scenarios that result in no tests."""
@@ -310,17 +302,6 @@ class TestSpecialCharacters:
         )
 
         # Should at least not crash
-        assert result.exit_code == 0
-
-    def test_tags_with_hyphen(self, runner):
-        """--tags with hyphens should work."""
-        result = runner.run(
-            "--tags",
-            "my-test-tag",
-            runner.fixture_path("test_single_test.py"),
-            wait_for_completion=True,
-        )
-
         assert result.exit_code == 0
 
 

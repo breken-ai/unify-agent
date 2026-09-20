@@ -11,23 +11,17 @@ set -euo pipefail
 # The pipe character "|" separates multiple values for a setting.
 # A full Cartesian product (grid) of all combinations is generated.
 #
-# Auto-Tagging:
-#   Each run is automatically tagged with all --env values passed to this script.
-#   This makes it easy to filter results by the specific configuration used.
-#   Tags are formatted as "KEY1=val1,KEY2=val2,..." and logged to the Combined context.
-#   Only explicitly passed --env values are tagged (not values from .env files).
-#
 # Note: Each combination runs sequentially (parallel_run.sh always blocks until
 #       completion). For truly parallel grid runs, launch in separate terminals.
 #
 # Example:
 #   ./grid_search.sh --env UNIFY_MODEL="gpt-4o|claude-3" --env UNILLM_CACHE="true|false" tests/
 #
-# Generates 4 runs with auto-tags:
-#   1. UNIFY_MODEL=gpt-4o UNILLM_CACHE=true   → tags: "UNIFY_MODEL=gpt-4o,UNILLM_CACHE=true"
-#   2. UNIFY_MODEL=gpt-4o UNILLM_CACHE=false  → tags: "UNIFY_MODEL=gpt-4o,UNILLM_CACHE=false"
-#   3. UNIFY_MODEL=claude-3 UNILLM_CACHE=true → tags: "UNIFY_MODEL=claude-3,UNILLM_CACHE=true"
-#   4. UNIFY_MODEL=claude-3 UNILLM_CACHE=false→ tags: "UNIFY_MODEL=claude-3,UNILLM_CACHE=false"
+# Generates 4 runs:
+#   1. UNIFY_MODEL=gpt-4o   UNILLM_CACHE=true
+#   2. UNIFY_MODEL=gpt-4o   UNILLM_CACHE=false
+#   3. UNIFY_MODEL=claude-3 UNILLM_CACHE=true
+#   4. UNIFY_MODEL=claude-3 UNILLM_CACHE=false
 
 # Resolve script directory and repo root
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -81,16 +75,16 @@ Examples:
   # With additional pass-through options
   ./grid_search.sh --env UNIFY_MODEL="gpt-4o|claude-3" --eval-only tests/
 
-  # Dry run to see what would be executed (including auto-tags)
+  # Dry run to see what would be executed
   ./grid_search.sh -n --env UNIFY_MODEL="gpt-4o|claude-3" tests/
 
-  # Add a constant variable to all runs (also included in tags)
+  # Add a constant variable to all runs
   ./grid_search.sh --env UNIFY_MODEL="gpt-4o|claude-3" --env EXPERIMENT_ID="exp-42" tests/
 
 Notes:
   - Each combination spawns a separate parallel_run.sh invocation
   - Combinations run sequentially (parallel_run.sh blocks until tests complete)
-  - Results are logged to the Combined context with tags and full settings for filtering
+  - Each run writes its own log directory under logs/pytest/
 USAGE
 }
 
@@ -137,16 +131,10 @@ done
 # If no grid variables, just run parallel_run.sh directly
 if (( ${#GRID_VARS[@]} == 0 )); then
   echo "No grid variables specified (use --env KEY=val1|val2). Running single invocation..."
-  # Build command with single env vars and auto-tags
   cmd=( "$PARALLEL_RUN" )
-  if (( ${#SINGLE_ENV_VARS[@]} > 0 )); then
-    for kv in "${SINGLE_ENV_VARS[@]}"; do
-      cmd+=( "--env" "$kv" )
-    done
-    # Auto-tag with all env vars
-    auto_tags=$(IFS=','; echo "${SINGLE_ENV_VARS[*]}")
-    cmd+=( "--tags" "$auto_tags" )
-  fi
+  for kv in "${SINGLE_ENV_VARS[@]+"${SINGLE_ENV_VARS[@]}"}"; do
+    cmd+=( "--env" "$kv" )
+  done
   cmd+=( "${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}" )
   cmd+=( "${TARGETS[@]+"${TARGETS[@]}"}" )
   exec "${cmd[@]}"
@@ -228,27 +216,16 @@ if (( DRY_RUN )); then
   echo "Dry run - commands that would be executed:"
   echo ""
   for combo in "${COMBINATIONS[@]}"; do
-    # Build the command
     cmd=( "$PARALLEL_RUN" )
-    # Collect all env vars for auto-tagging
-    declare -a all_env_for_tags=()
     for kv in $combo; do
       cmd+=( "--env" "$kv" )
-      all_env_for_tags+=( "$kv" )
     done
     for kv in "${SINGLE_ENV_VARS[@]+"${SINGLE_ENV_VARS[@]}"}"; do
       cmd+=( "--env" "$kv" )
-      all_env_for_tags+=( "$kv" )
     done
-    # Auto-tag with all env vars from command line
-    if (( ${#all_env_for_tags[@]} > 0 )); then
-      auto_tags=$(IFS=','; echo "${all_env_for_tags[*]}")
-      cmd+=( "--tags" "$auto_tags" )
-    fi
     cmd+=( "${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}" )
     cmd+=( "${TARGETS[@]+"${TARGETS[@]}"}" )
     echo "  ${cmd[*]}"
-    unset all_env_for_tags
   done
   exit 0
 fi
@@ -261,23 +238,13 @@ echo ""
 for i in "${!COMBINATIONS[@]}"; do
   combo="${COMBINATIONS[$i]}"
 
-  # Build the command
   cmd=( "$PARALLEL_RUN" )
-  # Collect all env vars for auto-tagging
-  declare -a all_env_for_tags=()
   for kv in $combo; do
     cmd+=( "--env" "$kv" )
-    all_env_for_tags+=( "$kv" )
   done
   for kv in "${SINGLE_ENV_VARS[@]+"${SINGLE_ENV_VARS[@]}"}"; do
     cmd+=( "--env" "$kv" )
-    all_env_for_tags+=( "$kv" )
   done
-  # Auto-tag with all env vars from command line
-  if (( ${#all_env_for_tags[@]} > 0 )); then
-    auto_tags=$(IFS=','; echo "${all_env_for_tags[*]}")
-    cmd+=( "--tags" "$auto_tags" )
-  fi
   cmd+=( "${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}" )
   cmd+=( "${TARGETS[@]+"${TARGETS[@]}"}" )
 

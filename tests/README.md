@@ -2,9 +2,9 @@
 
 This directory contains the test suite for Unify. Everything runs locally:
 each pytest process opens its own SQLite store (`UNIFY_STORE_PATH`), seeds
-the builtin catalogues into it, and binds a fresh context per test. There
-is no backend to start, no credentials beyond an LLM provider key, and no
-shared state between sessions.
+the primitive and builtin guidance catalogues into it, and empties the user
+tables before each test with `db.clear()`. There is no backend to start, no
+credentials beyond an LLM provider key, and no shared state between sessions.
 
 ## Table of Contents
 
@@ -175,7 +175,6 @@ parallel_run tests/ -- -k 'pattern'             # Filter by test name
 | `--env K=V` | Set environment variable (repeatable) |
 | `--no-cache` | Shorthand for `--env UNILLM_CACHE=false` |
 | `--repeat N` | Run each test N times |
-| `--tags TAG` | Tag runs for filtering |
 | `--` | Pass remaining args to pytest |
 
 Exit codes: `0` all passed, `1` something failed, `2` whole-run timeout.
@@ -193,6 +192,16 @@ Every session opens the SQLite store named by `UNIFY_STORE_PATH`. The runner
 gives each session its own file, `logs/pytest/<run>/stores/<session>.sqlite`,
 so sessions never share tables and each store stays on disk next to the
 session's log — open it with `sqlite3` to inspect what a test left behind.
+
+Within a session every test starts from an empty store: `tests/conftest.py`
+calls `db.clear()` before each test, which deletes the rows of `functions`,
+`guidance` and `messages` and restarts their id sequences. The seeded
+catalogues (`primitives`, `builtin_guidance`) persist across tests. After a
+run the file holds whatever the last test left behind:
+
+```bash
+sqlite3 logs/pytest/<run>/stores/<session>.sqlite 'SELECT name FROM functions;'
+```
 
 Set `UNIFY_STORE_PATH` yourself (in the environment, in `.env`, or via
 `--env`) and the runner honours it instead: every session then shares that

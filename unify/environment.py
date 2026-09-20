@@ -23,7 +23,7 @@ from typing import Any, Dict, List
 
 from packaging.requirements import Requirement
 
-from unify.db.engine import store_home
+from unify.db import store_home
 
 
 def environment_dir() -> Path:

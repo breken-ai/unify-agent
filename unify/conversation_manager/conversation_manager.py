@@ -119,7 +119,6 @@ class ConversationManager(metaclass=SingletonABCMeta):
         self,
         event_broker,
         stop: asyncio.Event,
-        project_name: str = "Assistants",
     ):
         # initialization state
         self.initialized: bool = False
@@ -132,7 +131,6 @@ class ConversationManager(metaclass=SingletonABCMeta):
         self._hydration_gate.set()
         self.ready_for_brain: bool = True
         self.loop = asyncio.get_event_loop()
-        self.project_name = project_name
 
         # shutdown
         self.shutdown_reason: str | None = None

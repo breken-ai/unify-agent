@@ -30,7 +30,7 @@ import pytest
 def _make_cm(event_broker, stop_event):
     from unify.conversation_manager.conversation_manager import ConversationManager
 
-    return ConversationManager(event_broker, stop_event, project_name="TestProject")
+    return ConversationManager(event_broker, stop_event)
 
 
 @pytest.fixture
@@ -270,7 +270,7 @@ class TestRebootOverTheSameWorld:
         from unify.conversation_manager.event_broker import reset_event_broker
 
         reset_event_broker()
-        cm1 = await start_async(project_name="TestProject")
+        cm1 = await start_async()
         cm1.in_flight_actions[1] = {"handle": _PromptHandle(), "handle_actions": []}
 
         started = time.monotonic()
@@ -278,7 +278,7 @@ class TestRebootOverTheSameWorld:
         # Deliberately no reset_event_broker() here: retirement itself must
         # leave nothing for a successor to trip over.
         cm2 = await asyncio.wait_for(
-            start_async(project_name="TestProject"),
+            start_async(),
             timeout=60.0,
         )
         elapsed = time.monotonic() - started

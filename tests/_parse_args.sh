@@ -9,7 +9,7 @@
 # After calling parse_test_args, these variables are populated:
 #   SERIAL, TIMEOUT, SESSION_TIMEOUT, NAME_PATTERN, EVAL_ONLY, SYMBOLIC_ONLY,
 #   DETERMINISTIC_ONLY, REPEAT_COUNT, MAX_JOBS,
-#   ENV_OVERRIDES[], TAGS[], PYTEST_EXTRA_ARGS[], PYTEST_COLLECTION_ARGS[],
+#   ENV_OVERRIDES[], PYTEST_EXTRA_ARGS[], PYTEST_COLLECTION_ARGS[],
 #   POSITIONAL_ARGS[]
 #
 # Additional functions:
@@ -40,7 +40,6 @@ parse_test_args() {
   REPEAT_COUNT=1
   MAX_JOBS=$_PARSE_ARGS_NUM_CORES
   ENV_OVERRIDES=()
-  TAGS=()
   PYTEST_EXTRA_ARGS=()
   PYTEST_COLLECTION_ARGS=()
   POSITIONAL_ARGS=()
@@ -112,19 +111,6 @@ parse_test_args() {
           shift 2
         else
           echo "Error: --repeat requires a positive integer argument (e.g., --repeat 5)." >&2
-          return 2
-        fi
-        ;;
-      --tags)
-        if [[ -n "${2-}" ]]; then
-          # Split on comma and add each tag to TAGS array
-          IFS=',' read -ra tag_parts <<< "$2"
-          for tag in "${tag_parts[@]}"; do
-            [[ -n "$tag" ]] && TAGS+=( "$tag" )
-          done
-          shift 2
-        else
-          echo "Error: --tags requires a value (e.g., --tags experiment-1 or --tags \"foo,bar\")." >&2
           return 2
         fi
         ;;
@@ -236,7 +222,6 @@ Options:
   --symbolic-only      Run only non-eval tests
   --deterministic-only Run only tests with no model in the loop
   --repeat N           Run each test N times
-  --tags TAG           Tag runs for filtering (repeatable)
   -h, --help           Show this help
   --                   Pass remaining args directly to pytest
 ${HELP_EXTRA_OPTIONS:-}

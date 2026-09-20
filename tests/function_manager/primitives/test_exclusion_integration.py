@@ -11,7 +11,6 @@ import pytest
 from unify.function_manager.function_manager import FunctionManager
 from unify.function_manager.primitives import PrimitiveScope, get_registry
 from unify.actor.environments import ActorEnvironment
-from unify.common.context_registry import ContextRegistry
 from tests.helpers import _handle_project
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -25,7 +24,6 @@ def fm_factory():
     managers = []
 
     def _create(**kwargs):
-        ContextRegistry.forget(FunctionManager, "Functions/Compositional")
         fm = FunctionManager(**kwargs)
         managers.append(fm)
         return fm
@@ -139,7 +137,7 @@ def test_filter_functions_excludes_tagged_primitive_ids(fm_factory):
 
     # Baseline
     fm_all = fm_factory(primitive_scope=_ACTOR_SCOPE)
-    hits_all = fm_all.filter_functions(filter="is_primitive == True")
+    hits_all = fm_all.filter_functions(filter="is_primitive = 1")
     names_all = {h["name"] for h in hits_all}
     assert _ACTOR_ACT in names_all
 
@@ -148,7 +146,7 @@ def test_filter_functions_excludes_tagged_primitive_ids(fm_factory):
         primitive_scope=_ACTOR_SCOPE,
         exclude_primitive_ids=frozenset({actor_act_id}),
     )
-    hits_excl = fm_excl.filter_functions(filter="is_primitive == True")
+    hits_excl = fm_excl.filter_functions(filter="is_primitive = 1")
     names_excl = {h["name"] for h in hits_excl}
     assert _ACTOR_ACT not in names_excl
 
@@ -166,7 +164,7 @@ def test_filter_functions_handles_production_sized_primitive_exclusions(fm_facto
     )
 
     hits = fm.filter_functions(
-        filter="is_primitive == True",
+        filter="is_primitive = 1",
         limit=5,
         include_implementations=False,
     )
@@ -194,7 +192,7 @@ def test_environment_function_ids_match_exclusion_targets():
         if meta.function_id is not None
     }
 
-    # Get IDs from collect_primitives (same source as the builtins catalogue seeding)
+    # Get IDs from collect_primitives (the source the primitives table is seeded from)
     collected = registry.collect_primitives(_ACTOR_SCOPE)
     collected_ids = {row["function_id"] for row in collected.values()}
 

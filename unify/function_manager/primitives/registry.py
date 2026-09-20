@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import hashlib
 import inspect
-import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -668,7 +667,7 @@ class ToolSurfaceRegistry:
 
         Returns:
             Dict mapping qualified_name (e.g. "primitives.actor.act") to primitive
-            metadata suitable for insertion into the Functions/Primitives context.
+            metadata in the shape of a ``primitives`` table row.
         """
         primitives: Dict[str, Dict[str, Any]] = {}
 
@@ -748,16 +747,16 @@ class ToolSurfaceRegistry:
 
     def primitive_row_filter(self, primitive_scope: PrimitiveScope) -> str:
         """
-        Build a Unify filter expression for scoped primitive queries.
+        Build the SQL clause selecting the primitives of the scoped managers.
 
-        Uses primitive_class (which is already stored in Function model) to filter,
-        avoiding the need for a separate primitive_manager field.
+        Matches on ``primitive_class`` (already stored on every primitive row),
+        so no separate manager column is needed.
 
         Args:
             primitive_scope: The scope defining which managers to include.
 
         Returns:
-            Filter expression using membership over primitive class paths.
+            A ``WHERE`` clause over ``primitive_class``; ``"0"`` for an empty scope.
         """
         # Collect class paths for scoped managers
         class_paths = []
@@ -767,9 +766,9 @@ class ToolSurfaceRegistry:
                 class_paths.append(spec.primitive_class_path)
 
         if not class_paths:
-            return "False"
-        class_list = ", ".join(json.dumps(cp) for cp in sorted(class_paths))
-        return f"primitive_class in [{class_list}]"
+            return "0"
+        class_list = ", ".join(f"'{cp}'" for cp in sorted(class_paths))
+        return f"primitive_class IN ({class_list})"
 
 
 # =============================================================================
@@ -786,7 +785,7 @@ def collect_primitives() -> Dict[str, Dict[str, Any]]:
 
     Returns:
         Dict mapping qualified_name (e.g. "primitives.actor.act") to primitive
-        metadata suitable for insertion into the Functions/Primitives context.
+        metadata in the shape of a ``primitives`` table row.
     """
     return get_registry().collect_primitives()
 

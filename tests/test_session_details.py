@@ -17,10 +17,8 @@ class TestPopulate:
 
         assert sd.is_initialized is False
         assert sd.assistant.agent_id is None
-        assert sd.assistant_context == "0"
-        assert sd.user_context == "default"
 
-    def test_populate_sets_identity_and_contexts(self):
+    def test_populate_sets_identity(self):
         sd = SessionDetails()
         sd.populate(
             agent_id=42,
@@ -35,8 +33,6 @@ class TestPopulate:
         assert sd.assistant.name == "Unify"
         assert sd.user.name == "Ada Lovelace"
         assert sd.user_id == "user-1"
-        assert sd.assistant_context == "42"
-        assert sd.user_context == "user-1"
 
     def test_reset_restores_defaults(self):
         sd = SessionDetails()

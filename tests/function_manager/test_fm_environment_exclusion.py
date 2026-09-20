@@ -4,7 +4,7 @@ Verifies:
 1. ToolMetadata supports function_id + function_context
 2. ToolSurfaceRegistry.get_function_id() matches collect_primitives() IDs
 3. ActorEnvironment populates function_id/function_context for each primitive
-4. FunctionManager exclusion filter generation (context-aware: primitive vs compositional)
+4. FunctionManager scope clause generation (stored functions vs primitives)
 """
 
 import pytest
@@ -17,6 +17,7 @@ from unify.function_manager.primitives.scope import PrimitiveScope
 from unify.function_manager.primitives.registry import get_registry, _get_stable_id
 
 _ACTOR_ACT = "primitives.actor.act"
+_ACTOR_CLASS_PATH = "unify.actor.environments.actor._ActorRunner"
 
 # ────────────────────────────────────────────────────────────────────────────
 # ToolMetadata function_id + function_context fields
@@ -138,7 +139,7 @@ def test_actor_env_allowed_methods_still_populates_function_ids():
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# FunctionManager context-aware exclusion filters
+# FunctionManager scope clauses
 # ────────────────────────────────────────────────────────────────────────────
 
 
@@ -148,9 +149,9 @@ def _make_fm_stub(
     exclude_primitive_ids=None,
     exclude_compositional_ids=None,
     primitive_scope=None,
+    include_primitives=True,
 ):
-    """Create a minimal stub that has the real FM methods bound."""
-    registry = get_registry()
+    """Create a minimal stub that has the real FM scope methods bound."""
     ns = SimpleNamespace(
         _filter_scope=filter_scope,
         _exclude_primitive_ids=(
@@ -160,116 +161,126 @@ def _make_fm_stub(
             frozenset(exclude_compositional_ids) if exclude_compositional_ids else None
         ),
         _primitive_scope=primitive_scope,
-        _registry=registry,
-        _build_id_exclusion=FunctionManager._build_id_exclusion,
+        _include_primitives=include_primitives,
+        _registry=get_registry(),
     )
-    ns._scoped_filter = lambda cf: FunctionManager._scoped_filter(ns, cf)
-    ns._scoped_primitive_filter = lambda: FunctionManager._scoped_primitive_filter(ns)
+    ns._compositional_scope = lambda cf=None: FunctionManager._compositional_scope(
+        ns,
+        cf,
+    )
+    ns._discovery_scope = lambda cf=None: FunctionManager._discovery_scope(ns, cf)
+    ns._scoped_primitive_filter = (
+        lambda cf=None: FunctionManager._scoped_primitive_filter(ns, cf)
+    )
     return ns
 
 
-# ── _build_id_exclusion (static helper) ──────────────────────────────────
+# ── _compositional_scope (stored functions) ─────────────────────────────
 
 
-def test_build_id_exclusion_none_when_empty():
-    """_build_id_exclusion returns None for empty/None sets."""
-    assert FunctionManager._build_id_exclusion(None) is None
-    assert FunctionManager._build_id_exclusion(frozenset()) is None
-
-
-def test_build_id_exclusion_single_id():
-    """_build_id_exclusion builds correct expression for a single ID."""
-    result = FunctionManager._build_id_exclusion(frozenset({42}))
-    assert result == "function_id != 42"
-
-
-def test_build_id_exclusion_multiple_ids_sorted():
-    """_build_id_exclusion builds compact sorted expression for multiple IDs."""
-    result = FunctionManager._build_id_exclusion(frozenset({30, 10, 20}))
-    assert result == "function_id not in [10, 20, 30]"
-
-
-# ── _scoped_filter (compositional context) ───────────────────────────────
-
-
-def test_scoped_filter_includes_compositional_exclusion():
-    """_scoped_filter applies compositional exclusions to compositional queries."""
+def test_compositional_scope_includes_compositional_exclusion():
+    """The compositional clause carries the caller filter, the filter_scope
+    and the compositional id exclusion."""
     fm = _make_fm_stub(
-        filter_scope="'data' in docstring",
+        filter_scope="docstring LIKE '%data%'",
         exclude_compositional_ids={42},
     )
-    result = fm._scoped_filter("name == 'foo'")
-    assert "name == 'foo'" in result
-    assert "'data' in docstring" in result
-    assert "function_id != 42" in result
+    result = fm._compositional_scope("name = 'foo'")
+    assert result == (
+        "(is_primitive = 0) AND (name = 'foo') AND (docstring LIKE '%data%')"
+        " AND (function_id NOT IN (42))"
+    )
 
 
-def test_scoped_filter_ignores_primitive_exclusion():
-    """_scoped_filter must NOT apply primitive exclusions.
-
-    Primitive function_ids live in a different DB context and could collide
-    with compositional auto-incremented IDs.
-    """
+def test_compositional_scope_ignores_primitive_exclusion():
+    """Primitive ids are hash-based and could collide with stored ids, so the
+    compositional clause never excludes them."""
     fm = _make_fm_stub(
-        filter_scope="'data' in docstring",
+        filter_scope="docstring LIKE '%data%'",
         exclude_primitive_ids={42},
     )
-    result = fm._scoped_filter("name == 'foo'")
+    result = fm._compositional_scope("name = 'foo'")
     assert "function_id" not in result
 
 
-def test_scoped_filter_filter_scope_only():
-    """_scoped_filter works with only filter_scope (no exclusions)."""
-    fm = _make_fm_stub(filter_scope="'data' in docstring")
-    result = fm._scoped_filter(None)
-    assert result == "'data' in docstring"
+def test_compositional_scope_filter_scope_only():
+    fm = _make_fm_stub(filter_scope="docstring LIKE '%data%'")
+    assert fm._compositional_scope() == (
+        "(is_primitive = 0) AND (docstring LIKE '%data%')"
+    )
 
 
-def test_scoped_filter_compositional_exclusion_only():
-    """_scoped_filter applies compositional exclusion even without filter_scope."""
-    fm = _make_fm_stub(exclude_compositional_ids={99})
-    result = fm._scoped_filter(None)
-    assert result == "function_id != 99"
+def test_compositional_scope_exclusion_ids_sorted():
+    fm = _make_fm_stub(exclude_compositional_ids={30, 10, 20})
+    assert fm._compositional_scope() == (
+        "(is_primitive = 0) AND (function_id NOT IN (10, 20, 30))"
+    )
 
 
-def test_scoped_filter_all_none_returns_none():
-    """_scoped_filter returns None when everything is empty."""
+def test_compositional_scope_bare_selects_stored_functions_only():
     fm = _make_fm_stub()
-    result = fm._scoped_filter(None)
-    assert result is None
+    assert fm._compositional_scope() == "is_primitive = 0"
 
 
-# ── _scoped_primitive_filter (primitive context) ─────────────────────────
+# ── _scoped_primitive_filter (primitives) ───────────────────────────────
 
 
 def test_scoped_primitive_filter_with_exclusion():
-    """_scoped_primitive_filter combines primitive_row_filter with primitive exclusion."""
-    registry = get_registry()
+    """The primitive clause combines primitive_row_filter with the primitive
+    id exclusion."""
     scope = PrimitiveScope.single("actor")
     fm = _make_fm_stub(exclude_primitive_ids={42}, primitive_scope=scope)
     result = fm._scoped_primitive_filter()
-    base_filter = registry.primitive_row_filter(scope)
-    assert base_filter in result
-    assert "function_id != 42" in result
-    assert " and " in result
+    assert result == (
+        f"(is_primitive = 1) AND ({get_registry().primitive_row_filter(scope)})"
+        " AND (function_id NOT IN (42))"
+    )
 
 
 def test_scoped_primitive_filter_ignores_compositional_exclusion():
-    """_scoped_primitive_filter must NOT apply compositional exclusions."""
-    registry = get_registry()
     scope = PrimitiveScope.single("actor")
     fm = _make_fm_stub(exclude_compositional_ids={42}, primitive_scope=scope)
     result = fm._scoped_primitive_filter()
-    expected = registry.primitive_row_filter(scope)
-    assert result == expected
-    assert "function_id != 42" not in result
+    assert result == (
+        f"(is_primitive = 1) AND ({get_registry().primitive_row_filter(scope)})"
+    )
 
 
-def test_scoped_primitive_filter_no_exclusion():
-    """_scoped_primitive_filter returns base filter when no exclusions set."""
-    registry = get_registry()
+def test_scoped_primitive_filter_ignores_filter_scope():
+    """filter_scope narrows stored functions, never the primitive surface."""
     scope = PrimitiveScope.single("actor")
-    fm = _make_fm_stub(primitive_scope=scope)
-    result = fm._scoped_primitive_filter()
-    expected = registry.primitive_row_filter(scope)
-    assert result == expected
+    fm = _make_fm_stub(filter_scope="docstring LIKE '%data%'", primitive_scope=scope)
+    assert "docstring" not in fm._scoped_primitive_filter()
+
+
+def test_primitive_row_filter_is_a_class_membership_clause():
+    registry = get_registry()
+    assert registry.primitive_row_filter(PrimitiveScope.single("actor")) == (
+        f"primitive_class IN ('{_ACTOR_CLASS_PATH}')"
+    )
+
+
+# ── _discovery_scope (both populations) ─────────────────────────────────
+
+
+def test_discovery_scope_unions_populations_under_caller_filter():
+    scope = PrimitiveScope.single("actor")
+    fm = _make_fm_stub(
+        filter_scope="docstring LIKE '%data%'",
+        exclude_compositional_ids={7},
+        exclude_primitive_ids={42},
+        primitive_scope=scope,
+    )
+    assert fm._discovery_scope("name LIKE 'get_%'") == (
+        "(name LIKE 'get_%') AND ("
+        f"({fm._compositional_scope()}) OR ({fm._scoped_primitive_filter()}))"
+    )
+
+
+def test_discovery_scope_without_primitives_is_the_compositional_scope():
+    fm = _make_fm_stub(
+        filter_scope="docstring LIKE '%data%'",
+        primitive_scope=PrimitiveScope.single("actor"),
+        include_primitives=False,
+    )
+    assert fm._discovery_scope() == fm._compositional_scope()

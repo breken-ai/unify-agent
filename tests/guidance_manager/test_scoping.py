@@ -3,9 +3,9 @@ from __future__ import annotations
 from unify.guidance_manager.guidance_manager import GuidanceManager
 from tests.helpers import _handle_project
 
-# Reads federate over the assistant's own context plus the read-only builtins
-# library, so whole-view assertions scope to the assistant's own rows explicitly.
-OWN_ONLY = "is_builtin == False"
+# Reads span the assistant's own rows plus the read-only builtins library, so
+# whole-view assertions scope to the assistant's own rows explicitly.
+OWN_ONLY = "is_builtin = 0"
 
 
 def _seed(gm: GuidanceManager) -> dict[str, int]:
@@ -29,7 +29,7 @@ def test_filter_scope_restricts_filter():
     gm = GuidanceManager()
     ids = _seed(gm)
 
-    gm.filter_scope = f"guidance_id == {ids['Beta']}"
+    gm.filter_scope = f"guidance_id = {ids['Beta']}"
     rows = gm.filter()
     assert len(rows) == 1
     assert rows[0].guidance_id == ids["Beta"]
@@ -42,16 +42,34 @@ def test_filter_scope_composes_with_caller_filter():
     gm = GuidanceManager()
     ids = _seed(gm)
 
-    gm.filter_scope = f"guidance_id == {ids['Alpha']} or guidance_id == {ids['Beta']}"
+    gm.filter_scope = f"guidance_id = {ids['Alpha']} OR guidance_id = {ids['Beta']}"
 
-    rows = gm.filter(filter="title == 'Alpha'")
+    rows = gm.filter(filter="title = 'Alpha'")
     assert len(rows) == 1
     assert rows[0].title == "Alpha"
 
-    rows = gm.filter(filter="title == 'Gamma'")
+    rows = gm.filter(filter="title = 'Gamma'")
     assert len(rows) == 0
 
     gm.filter_scope = None
+
+
+@_handle_project
+def test_rejected_filter_returns_error_payload():
+    gm = GuidanceManager()
+    _seed(gm)
+
+    payload = gm.filter(filter="no_such_column = 1")
+    assert isinstance(payload, dict)
+    assert payload["error_kind"] == "invalid_filter"
+    assert payload["details"]["filter"] == "no_such_column = 1"
+    assert "guidance_id" in payload["details"]["columns"]
+
+    # A clause that tries to write is refused rather than run.
+    payload = gm.filter(filter="1 = 1; DELETE FROM guidance")
+    assert isinstance(payload, dict)
+    assert payload["error_kind"] == "invalid_filter"
+    assert len(gm.filter(filter=OWN_ONLY)) == 3
 
 
 # -- exclude_ids ------------------------------------------------------------
@@ -95,7 +113,7 @@ def test_scope_and_exclusion_combined():
     gm = GuidanceManager()
     ids = _seed(gm)
 
-    gm.filter_scope = f"guidance_id == {ids['Alpha']} or guidance_id == {ids['Beta']}"
+    gm.filter_scope = f"guidance_id = {ids['Alpha']} OR guidance_id = {ids['Beta']}"
     gm.exclude_ids = frozenset({ids["Alpha"]})
 
     rows = gm.filter()
@@ -114,7 +132,7 @@ def test_search_respects_filter_scope():
     gm = GuidanceManager()
     ids = _seed(gm)
 
-    gm.filter_scope = f"guidance_id == {ids['Alpha']}"
+    gm.filter_scope = f"guidance_id = {ids['Alpha']}"
 
     results = gm.search(references={"title": "procedures"}, k=10)
     returned_ids = {r.guidance_id for r in results}
@@ -130,8 +148,8 @@ def test_search_respects_exclude_ids():
 
     gm.exclude_ids = frozenset({ids["Beta"]})
 
-    # k spans the full federated view (own rows + builtins library) so
-    # the assertion checks exclusion rather than ranking position.
+    # k spans the whole view (own rows + builtins library) so the assertion
+    # checks exclusion rather than ranking position.
     results = gm.search(references={"title": "procedures"}, k=100)
     returned_ids = {r.guidance_id for r in results}
     assert ids["Beta"] not in returned_ids
@@ -151,8 +169,8 @@ def test_num_items_respects_filter_scope():
     ids = _seed(gm)
     assert gm._num_items() == builtin_count + 3
 
-    # The scope applies to every federated source, builtins included.
-    gm.filter_scope = f"guidance_id == {ids['Alpha']}"
+    # The scope applies to the whole view, builtins included.
+    gm.filter_scope = f"guidance_id = {ids['Alpha']}"
     assert gm._num_items() == 1
 
     gm.filter_scope = None
@@ -178,7 +196,7 @@ def test_clearing_scope_restores_full_view():
     gm = GuidanceManager()
     ids = _seed(gm)
 
-    gm.filter_scope = f"guidance_id == {ids['Gamma']}"
+    gm.filter_scope = f"guidance_id = {ids['Gamma']}"
     assert len(gm.filter()) == 1
 
     gm.filter_scope = None
@@ -199,7 +217,7 @@ def test_limit_with_scope():
     gm = GuidanceManager()
     ids = _seed(gm)
 
-    gm.filter_scope = f"guidance_id == {ids['Alpha']} or guidance_id == {ids['Beta']}"
+    gm.filter_scope = f"guidance_id = {ids['Alpha']} OR guidance_id = {ids['Beta']}"
 
     rows = gm.filter(limit=1)
     assert len(rows) == 1

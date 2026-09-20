@@ -82,7 +82,7 @@ class BaseGuidanceManager(BaseStateManager, metaclass=SingletonABCMeta):
         offset: int = 0,
         limit: int = 100,
     ) -> List["Guidance"]:
-        """Filter guidance entries using a Python filter expression.
+        """Filter guidance entries with a SQL ``WHERE`` clause.
 
         Guidance entries contain procedural how-to information: step-by-step
         instructions, operating procedures, software walkthroughs, and
@@ -100,15 +100,14 @@ class BaseGuidanceManager(BaseStateManager, metaclass=SingletonABCMeta):
         Parameters
         ----------
         filter : str | None, default None
-            A Python boolean expression evaluated with column names in
-            scope (e.g. ``"guidance_id == 42"``).  When ``None``, returns
-            all guidance records subject to pagination. Supported grammar:
-            comparisons (==, !=, <, <=, >, >=), membership tests (in / not
-            in), and boolean combinators (and, or, not) over field names and
-            literal values, plus a fixed set of helpers (``len()``, string
-            methods like ``.lower()`` / ``.startswith()``). Arbitrary Python
-            calls outside that set — e.g. ``' '.join(x)`` or a list
-            comprehension — are rejected.
+            A SQLite ``WHERE`` clause (without the ``WHERE`` keyword) over the
+            columns ``guidance_id``, ``title``, ``content``, ``function_ids``
+            (JSON list; test membership with
+            ``EXISTS (SELECT 1 FROM json_each(function_ids) WHERE value = 42)``),
+            ``stale_reasons`` and ``is_builtin`` (0 or 1), e.g.
+            ``"title LIKE '%deploy%' AND is_builtin = 0"``. When ``None``,
+            returns all guidance records subject to pagination. The clause is
+            executed read-only; anything other than a read is rejected.
         offset : int, default 0
             Zero-based index of the first result to include.
         limit : int, default 100

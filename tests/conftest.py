@@ -21,8 +21,6 @@ import os
 import random
 import re
 
-import hashlib
-
 import pytest
 from unify import db
 from pytest_metadata.plugin import metadata_key
@@ -37,9 +35,7 @@ _root_logger_early = logging.getLogger()
 if not _root_logger_early.handlers:
     _root_logger_early.addHandler(logging.NullHandler())
 
-from tests.helpers import set_session_tags
 from tests.settings import SETTINGS
-from unify.session_details import UNASSIGNED_ASSISTANT_CONTEXT, UNASSIGNED_USER_CONTEXT
 
 # Diagnostic switch for the async tool loop's sent-watermark append-only
 # transcript invariant. Prod behavior is identical whether this is set or
@@ -51,100 +47,33 @@ from unify.session_details import UNASSIGNED_ASSISTANT_CONTEXT, UNASSIGNED_USER_
 os.environ.setdefault("UNIFY_TRANSCRIPT_INVARIANT_CHECKS", "1")
 
 
-def _derive_test_context(item: pytest.Item) -> str:
-    """
-    Derive a per-test Unify context path that is stable and unique.
-
-    Matches the intent of tests.helpers._TestContext.setup(), but runs early enough
-    (pytest_runtest_setup) to wrap fixture setup + teardown, preventing cross-test
-    interference when fixtures create/clear managers that delete contexts.
-    """
-    # Build "tests/<relpath-without-.py>/<func_name>" prefix
-    file_path = str(getattr(item, "fspath", "") or "")
-    parts = file_path.split(f"{os.sep}tests{os.sep}")
-    if len(parts) > 1:
-        rel_path = parts[1].replace(os.sep, "/")
-        if rel_path.endswith(".py"):
-            rel_path = rel_path[:-3]
-        test_path = f"tests/{rel_path}"
-    else:
-        # Fallback (should be rare): use nodeid as the "path"
-        test_path = "tests/unknown"
-
-    func_name = getattr(item, "originalname", None) or getattr(item, "name", "test")
-
-    # Parametrized tests: include a stable suffix so contexts don't collide
-    nodeid = getattr(item, "nodeid", "")
-    if "[" in nodeid:
-        normalized = _normalize_pytest_nodeid(nodeid)
-        if normalized is None:
-            normalized = hashlib.md5(nodeid.encode("utf-8")).hexdigest()[:8]
-        func_name = f"{func_name}/{normalized}"
-
-    # Mirror production hierarchy: .../{user_id}/{assistant_id}
-    return f"{test_path}/{func_name}/{UNASSIGNED_USER_CONTEXT}/{UNASSIGNED_ASSISTANT_CONTEXT}"
-
-
 def _reset_singleton_registries() -> None:
-    # Ensure singleton registries don't leak across tests and that fixtures see
-    # the correct context for any context-derived subcontexts (e.g. FunctionManager).
-    try:
-        from unify.common.context_registry import ContextRegistry
-        from unify.manager_registry import ManagerRegistry
-        from unify.events.event_bus import EVENT_BUS
+    """Singletons must not leak across tests."""
+    from unify.manager_registry import ManagerRegistry
+    from unify.events.event_bus import EVENT_BUS
 
-        ManagerRegistry.clear()
-        ContextRegistry.clear()
-        EVENT_BUS.clear()
-    except Exception:
-        pass
+    ManagerRegistry.clear()
+    EVENT_BUS.clear()
 
 
-def _assert_test_context_active(ctx: str) -> None:
-    # After setup the context vars must hold the per-test root. If they
-    # don't, every subsequent test would share one context root and
-    # cross-contaminate — fail the session here instead.
-    active = db.get_active_context()
-    assert active.get("read") == ctx and active.get("write") == ctx, (
-        f"Per-test Unify context activation failed: expected {ctx!r}, "
-        f"active is {active!r}. Test isolation would be lost."
-    )
-
-
-def _set_unify_context_for_test(item: pytest.Item) -> None:
-    """Bind a fresh, unique per-test Unify context early (before fixtures)."""
-    ctx = _derive_test_context(item)
-    setattr(item, "_unity_unify_test_ctx", ctx)
-
-    # Clean slate: a rerun of the same test in a reused store must not see
-    # the previous run's rows.
-    db.delete_context(ctx)
-    db.set_context(ctx, relative=False)
+def _reset_store_for_test() -> None:
+    """Give the test an empty store: the user tables are truncated and their
+    id sequences restart, so a rerun in a reused store never sees a previous
+    run's rows. The seeded catalogues (primitives, builtin guidance) stay."""
+    db.clear()
     _reset_singleton_registries()
-    _assert_test_context_active(ctx)
 
 
 def _uses_unify_context(item: pytest.Item) -> bool:
-    """Return whether this test needs the default per-test Unify context."""
+    """Return whether this test needs the per-test store reset."""
 
     return item.get_closest_marker("no_unify_context") is None
-
-
-def _unset_unify_context_for_test(item: pytest.Item) -> None:
-    """Unset (and optionally delete) the per-test Unify context after fixture teardown."""
-    ctx = getattr(item, "_unity_unify_test_ctx", None)
-    try:
-        if ctx and SETTINGS.UNIFY_DELETE_CONTEXT_ON_EXIT:
-            db.delete_context(ctx)
-    finally:
-        db.unset_context()
 
 
 def pytest_report_header(config):
     settings_str = [f"{k}={v}" for k, v in SETTINGS.model_dump().items()]
     return [
         f"unify_store={os.environ.get('UNIFY_STORE_PATH')}",
-        f"unify_project={db.active_project()}",
         f"UNILLM_CACHE={os.environ.get('UNILLM_CACHE', 'not set')}",
     ] + settings_str
 
@@ -222,7 +151,6 @@ def stub_external_deps(monkeypatch):
 # 3. Singleton isolation                                                      #
 # --------------------------------------------------------------------------- #
 
-from unify.common.context_registry import ContextRegistry
 from unify.manager_registry import ManagerRegistry
 
 
@@ -231,7 +159,6 @@ def _clear_singletons_between_tests():
     """Ensure *singleton* instances never leak from one test to the next."""
     yield
     ManagerRegistry.clear()  # Clear the registry after each test
-    ContextRegistry.clear()  # Clear the context handler after each test
 
 
 @pytest.fixture(autouse=True)
@@ -269,14 +196,6 @@ def _exact_cache_keying_for_evals(request):
 
 
 def pytest_addoption(parser):
-    parser.addoption(
-        "--test-tags",
-        action="store",
-        default="",
-        help="Comma-separated list of tags to associate with this test run "
-        "(logged to the Combined context). Falls back to UNIFY_TEST_TAGS env var.",
-    )
-
     group = parser.getgroup("custom-logging")
     group.addoption(
         "--test-log-enable",
@@ -360,65 +279,14 @@ def pytest_sessionstart(session):
     if os.environ.get("SKIP_UNIFY_TEST_INIT"):
         return
 
-    project_name = SETTINGS.test_project_name
-
-    # ------------------------------------------------------------------
-    #  Optionally delete the project before starting (clean slate). Only
-    #  meaningful when the store is reused across runs via UNIFY_STORE_PATH;
-    #  a per-process store starts empty anyway.
-    # ------------------------------------------------------------------
-    if SETTINGS.UNIFY_TESTS_DELETE_PROJ_ON_START:
-        db.delete_project(project_name)
-
     if os.environ.get("GITHUB_ACTIONS"):
         import unillm
 
         unillm.set_cache_backend("local_separate")
 
-    # ------------------------------------------------------------------
-    #  Activate the test project and initialise the runtime
-    # ------------------------------------------------------------------
-    db.activate(project_name, overwrite=SETTINGS.UNIFY_OVERWRITE_PROJECT)
-
     import unify  # local import to avoid affecting stub installation order
 
-    unify.init(project_name)
-
-    # ------------------------------------------------------------------
-    #  Seed the global builtins catalogues (primitives + guidance). Each
-    #  process owns its store, so this is a cold seed every session; both
-    #  seeders are hash-guarded.
-    # ------------------------------------------------------------------
-    from unify.function_manager.builtins_catalog import seed_builtin_primitives
-    from unify.guidance_manager.builtins_catalog import seed_builtin_guidance
-
-    seed_builtin_primitives()
-    seed_builtin_guidance()
-
-    # ------------------------------------------------------------------
-    #  Parse and store session-level test tags for duration logging
-    #  Priority: CLI --test-tags > env var UNIFY_TEST_TAGS
-    # ------------------------------------------------------------------
-    tags_raw = session.config.getoption("--test-tags", default="")
-    if not tags_raw:
-        tags_raw = SETTINGS.UNIFY_TEST_TAGS
-    tags = [t.strip() for t in tags_raw.split(",") if t.strip()]
-    set_session_tags(tags)
-
-    # ------------------------------------------------------------------
-    #  Ensure the Combined context exists for duration and LLM I/O logging
-    # ------------------------------------------------------------------
-    db.create_context("Combined")
-    db.create_fields(
-        context="Combined",
-        fields={
-            "test_fpath": {"type": "str", "mutable": True},
-            "tags": {"type": "list", "mutable": True},
-            "duration": {"type": "float", "mutable": True},
-            "llm_io": {"type": "list", "mutable": True},
-            "settings": {"type": "dict", "mutable": True},
-        },
-    )
+    unify.init()
 
 
 def pytest_sessionfinish(session, exitstatus):
@@ -446,9 +314,6 @@ def pytest_sessionfinish(session, exitstatus):
                 f.write(f"{total_cost:.6g}\n")
     except Exception:
         pass
-
-    if SETTINGS.UNIFY_TESTS_DELETE_PROJ_ON_EXIT and db.active_project():
-        db.delete_project(db.active_project())
 
 
 def pytest_unconfigure(config):
@@ -512,7 +377,7 @@ _hf_home_set_by_us: bool = False
 def pytest_configure(config):
     config.addinivalue_line(
         "markers",
-        "no_unify_context: skip automatic per-test Unify context setup for pure unit tests",
+        "no_unify_context: skip the per-test store reset for pure unit tests",
     )
 
     # ------------------------------------------------------------------
@@ -596,7 +461,7 @@ def pytest_configure(config):
 def pytest_runtest_setup(item):
     test_name_log_filter.set_test_name(item.nodeid)
     if not os.environ.get("SKIP_UNIFY_TEST_INIT") and _uses_unify_context(item):
-        _set_unify_context_for_test(item)
+        _reset_store_for_test()
 
 
 def _normalize_pytest_nodeid(nodeid):
@@ -675,8 +540,6 @@ def pytest_report_teststatus(report, config):
 
 
 def pytest_runtest_teardown(item, nextitem=None):
-    if not os.environ.get("SKIP_UNIFY_TEST_INIT") and _uses_unify_context(item):
-        _unset_unify_context_for_test(item)
     test_name_log_filter.reset_test_name()
 
 

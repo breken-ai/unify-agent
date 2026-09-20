@@ -12,7 +12,7 @@ def get_local_root() -> str:
     directory under the store home (``UNIFY_HOME``, default ``~/.unify``).
     Every path the assistant works with resolves through this function.
     """
-    from unify.db.engine import store_home
+    from unify.db import store_home
     from unify.settings import SETTINGS
 
     explicit = SETTINGS.UNIFY_LOCAL_ROOT.strip()

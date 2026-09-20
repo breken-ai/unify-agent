@@ -80,7 +80,7 @@ async def conversation_manager(request) -> CMStepDriver:
     reset_event_broker()
 
     print("\n✓ Starting ConversationManager in-process...")
-    cm = await start_async(project_name="TestProject")
+    cm = await start_async()
     print("✓ ConversationManager started (in-process mode)")
     print("  Using SimulatedActor for deterministic testing")
 

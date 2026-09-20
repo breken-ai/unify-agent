@@ -37,7 +37,7 @@ events over the broker drives the same loop. Programmatic callers use
 │                                                                           │
 │  ┌─────────────────┐  ┌─────────────────┐  ┌───────────────────────────┐  │
 │  │   ChatHistory   │  │ NotificationBar │  │          Brain            │  │
-│  │ (Chat/Messages) │  │    (pending)    │  │     (async tool loop)     │  │
+│  │   (messages)    │  │    (pending)    │  │     (async tool loop)     │  │
 │  └─────────────────┘  └─────────────────┘  └───────────────────────────┘  │
 │                                                                           │
 │  ┌─────────────────────────────────────────────────────────────────────┐  │
@@ -73,13 +73,11 @@ an async tool loop that reads that state and decides what to do next.
 ### `ChatHistory` (`domains/chat_history.py`)
 
 The conversation itself: an in-memory list of `ChatMessage` (role, content,
-attachment paths, timestamp) mirrored one row per message to the
-`Chat/Messages` table, declared in `ChatHistory.Config.required_contexts`
-and provisioned through `ContextRegistry`. `bind()` runs during manager
-init and writes through anything that arrived earlier; `load()` prepends the
-previous sessions' messages so the conversation survives a restart, and the
-slow brain's first turn after a boot holds at the hydration gate until that
-load has landed.
+attachment paths, timestamp) mirrored one row per message to the store's
+`messages` table. `bind()` runs during manager init and writes through
+anything that arrived earlier; `load()` prepends the previous sessions'
+messages so the conversation survives a restart, and the slow brain's first
+turn after a boot holds at the hydration gate until that load has landed.
 
 Identity comes from `SESSION_DETAILS`: the user's name labels their lines
 in the rendered conversation and fills the "User details" section of the

@@ -1,9 +1,9 @@
 """Symbolic: search_functions ranks by standing and drops the lapsed.
 
-The federated layer is monkeypatched (the same seam test_federated_reads
-uses), so these tests pin the wiring — overfetch, activation ordering,
-scope dropout, include_dormant, primitive immunity, and the disabled
-master switch — without touching the store.
+The text-ranking step is monkeypatched, so these tests pin the wiring —
+overfetch, activation ordering, scope dropout, include_dormant, primitive
+immunity, and the disabled master switch — without depending on what the
+store holds.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ def _row(
     row: Dict[str, Any] = {
         "function_id": abs(hash(name)) % 10_000,
         "name": name,
-        "_federated_score": score,
+        "_similarity": score,
         "is_primitive": is_primitive,
         "created_at": (NOW - timedelta(days=created_days_ago)).isoformat(),
     }
@@ -56,12 +56,12 @@ def _row(
 def _patch_search(monkeypatch: pytest.MonkeyPatch, rows: List[Dict[str, Any]]):
     calls: Dict[str, Any] = {}
 
-    def _fake(contexts, terms, *, limit, unique_id_field, backfill):
+    def _fake(candidates, references, *, limit, id_field, backfill):
         calls["limit"] = limit
         return [dict(r) for r in rows]
 
-    monkeypatch.setattr(fm_module, "federated_text_search", _fake)
-    # Search-hit bumps would hit the backend for rows that do not exist.
+    monkeypatch.setattr(fm_module, "rank_by_text", _fake)
+    # Search-hit bumps would write usage for rows that do not exist.
     monkeypatch.setattr(
         FunctionManager,
         "_bump_search_hits",
@@ -83,7 +83,7 @@ def test_dormant_functions_drop_out_of_search(monkeypatch) -> None:
     rows = fm.search_functions(query="anything", n=5)
     names = [r["name"] for r in rows]
     assert names == ["fresh"]
-    # Overfetch: the federated fetch asked for more than n.
+    # Overfetch: the ranking step was asked for more than n.
     assert seen["limit"] > 5
 
 
@@ -160,6 +160,6 @@ def test_master_switch_off_restores_pre_activation_behaviour(monkeypatch) -> Non
         property(lambda self: ActivationSettings(enabled=False)),
     )
     rows = fm.search_functions(query="anything", n=5)
-    # Untouched: federated order preserved, nothing filtered, no overfetch.
+    # Untouched: ranking order preserved, nothing filtered, no overfetch.
     assert [r["name"] for r in rows] == ["lapsed_daily", "fresh"]
     assert seen["limit"] == 5

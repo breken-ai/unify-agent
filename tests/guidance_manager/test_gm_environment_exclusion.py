@@ -2,91 +2,82 @@
 
 Mirrors tests/function_manager/test_fm_environment_exclusion.py for the
 guidance side.  Verifies:
-1. _build_id_exclusion produces correct filter clauses
-2. _scoped_filter composes caller_filter / filter_scope / exclude_ids
+1. The SQL clause helpers produce correct exclusion clauses
+2. GuidanceManager._scope composes caller filter / filter_scope / exclude_ids
 3. _resolve_prompt_guidance returns (text, resolved_ids)
 4. The wiring in ActorEnvironment.act() sets exclude_ids on the inner GM
 """
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from typing import Optional
 
-
+from unify.common.sql_filters import and_clauses, not_in
 from unify.guidance_manager.guidance_manager import GuidanceManager
 from tests.helpers import _handle_project
 
 # ────────────────────────────────────────────────────────────────────────────
-# _build_id_exclusion (static helper)
+# Exclusion clause
 # ────────────────────────────────────────────────────────────────────────────
 
 
-def test_build_id_exclusion_none_when_empty():
-    assert GuidanceManager._build_id_exclusion(None) is None
-    assert GuidanceManager._build_id_exclusion(frozenset()) is None
+def test_not_in_none_when_empty():
+    assert not_in("guidance_id", None) is None
+    assert not_in("guidance_id", frozenset()) is None
 
 
-def test_build_id_exclusion_single_id():
-    result = GuidanceManager._build_id_exclusion(frozenset({7}))
-    assert result == "guidance_id != 7"
+def test_not_in_single_id():
+    assert not_in("guidance_id", frozenset({7})) == "guidance_id NOT IN (7)"
 
 
-def test_build_id_exclusion_multiple_ids_sorted():
-    result = GuidanceManager._build_id_exclusion(frozenset({30, 10, 20}))
-    assert result == "guidance_id not in [10, 20, 30]"
+def test_not_in_multiple_ids_sorted():
+    result = not_in("guidance_id", frozenset({30, 10, 20}))
+    assert result == "guidance_id NOT IN (10, 20, 30)"
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# _scoped_filter (composition of caller_filter / filter_scope / exclude_ids)
+# _scope (composition of caller filter / filter_scope / exclude_ids)
 # ────────────────────────────────────────────────────────────────────────────
 
 
-def _make_gm_stub(
+def _make_gm(
     *,
     filter_scope: Optional[str] = None,
     exclude_ids: Optional[frozenset[int]] = None,
-) -> SimpleNamespace:
-    """Minimal stub with real GuidanceManager filter-composition methods."""
-    ns = SimpleNamespace(
-        _filter_scope=filter_scope,
-        _exclude_ids=frozenset(exclude_ids) if exclude_ids else None,
+) -> GuidanceManager:
+    return GuidanceManager(filter_scope=filter_scope, exclude_ids=exclude_ids)
+
+
+def test_scope_includes_exclusion():
+    gm = _make_gm(filter_scope="is_builtin = 0", exclude_ids={5})
+    result = gm._scope("title = 'Deploy'")
+    assert result == and_clauses(
+        "title = 'Deploy'",
+        "is_builtin = 0",
+        "guidance_id NOT IN (5)",
     )
-    ns._build_id_exclusion = GuidanceManager._build_id_exclusion
-    ns._scoped_filter = lambda cf: GuidanceManager._scoped_filter(ns, cf)
-    return ns
+    assert "title = 'Deploy'" in result
+    assert "is_builtin = 0" in result
+    assert "guidance_id NOT IN (5)" in result
 
 
-def test_scoped_filter_includes_exclusion():
-    gm = _make_gm_stub(
-        filter_scope="category == 'ops'",
-        exclude_ids={5},
-    )
-    result = gm._scoped_filter("title == 'Deploy'")
-    assert "title == 'Deploy'" in result
-    assert "category == 'ops'" in result
-    assert "guidance_id != 5" in result
+def test_scope_exclusion_only():
+    gm = _make_gm(exclude_ids={99})
+    assert gm._scope(None) == "guidance_id NOT IN (99)"
 
 
-def test_scoped_filter_exclusion_only():
-    gm = _make_gm_stub(exclude_ids={99})
-    result = gm._scoped_filter(None)
-    assert result == "guidance_id != 99"
+def test_scope_filter_scope_only():
+    gm = _make_gm(filter_scope="is_builtin = 0")
+    assert gm._scope(None) == "is_builtin = 0"
 
 
-def test_scoped_filter_scope_only():
-    gm = _make_gm_stub(filter_scope="category == 'ops'")
-    result = gm._scoped_filter(None)
-    assert result == "category == 'ops'"
-
-
-def test_scoped_filter_all_none_returns_none():
-    gm = _make_gm_stub()
-    assert gm._scoped_filter(None) is None
+def test_scope_all_none_returns_none():
+    gm = _make_gm()
+    assert gm._scope(None) is None
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# _resolve_prompt_guidance — empty / None fast path (no backend needed)
+# _resolve_prompt_guidance — empty / None fast path (no store rows needed)
 # ────────────────────────────────────────────────────────────────────────────
 
 
@@ -107,7 +98,7 @@ def test_resolve_prompt_guidance_empty_list():
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# _resolve_prompt_guidance — with real guidance entries (backend required)
+# _resolve_prompt_guidance — with real guidance entries
 # ────────────────────────────────────────────────────────────────────────────
 
 
@@ -230,3 +221,16 @@ def test_build_scoped_gm_receives_exclude_ids():
     returned_ids = {r.guidance_id for r in rows}
     assert ids["Deploy Guide"] not in returned_ids
     assert ids["Review Checklist"] in returned_ids
+
+
+@_handle_project
+def test_build_scoped_gm_applies_guidance_scope():
+    """A guidance_scope becomes the inner manager's SQL filter_scope."""
+    from unify.actor.environments.actor import _build_scoped_gm
+
+    gm = GuidanceManager()
+    ids = _seed(gm)
+
+    inner_gm = _build_scoped_gm("title LIKE '%Checklist%'")
+    assert inner_gm.filter_scope == "title LIKE '%Checklist%'"
+    assert {r.guidance_id for r in inner_gm.filter()} == {ids["Review Checklist"]}

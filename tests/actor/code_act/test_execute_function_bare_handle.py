@@ -240,10 +240,6 @@ async def test_execute_function_returns_composite_when_side_output_present():
     the execution produces stdout alongside the handle."""
     # A composed function that prints AND returns a handle — the print
     # output is meaningful intermediate content the LLM should observe.
-    from unify.common.context_registry import ContextRegistry
-
-    ContextRegistry.forget(FunctionManager, "Functions/Compositional")
-
     fm = FunctionManager()
     fm.add_functions(
         implementations="""

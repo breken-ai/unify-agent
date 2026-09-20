@@ -79,7 +79,7 @@ async def cm_with_eventbus():
 
     reset_event_broker()
 
-    cm = await start_async(project_name="TestEventLogging")
+    cm = await start_async()
 
     # Initialize managers with SimulatedActor. steps=0: this fixture never
     # drives simulate_step()/trigger_completion(); a positive budget would

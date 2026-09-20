@@ -2,16 +2,16 @@
 
 Three layers:
 
-* Pure parsing / mapping tests (no backend) covering frontmatter parsing,
+* Pure parsing / mapping tests (no store) covering frontmatter parsing,
   discovery, title namespacing, and content composition for both the
   OpenClaw (single-line JSON ``metadata``) and HermesAgent (nested YAML
   ``metadata``) flavours of the agentskills.io standard.
-* Builtins-import tests (no backend, local git fixtures) covering manifest
+* Builtins-import tests (no store, local git fixtures) covering manifest
   parsing, pin verification (SHA + directory integrity hash), snapshot
   building, drift detection, and stable-id determinism.
 * End-to-end tests that build a tiny on-disk skill tree and import it into a
-  real ``GuidanceManager`` (under ``@_handle_project``), exercising the
-  add / skip / overwrite conflict paths.
+  real ``GuidanceManager``, exercising the add / skip / overwrite conflict
+  paths.
 """
 
 from __future__ import annotations
@@ -41,11 +41,7 @@ from scripts.skill_migration.skill_to_guidance import (
     parse_skill_file,
     split_frontmatter,
 )
-from unify.guidance_manager.builtins_catalog import (
-    entry_hash,
-    load_snapshot,
-    stable_guidance_id,
-)
+from unify.guidance_manager.builtins import load_snapshot, stable_guidance_id
 from unify.guidance_manager.guidance_manager import GuidanceManager
 from tests.helpers import _handle_project
 
@@ -365,13 +361,6 @@ def test_stable_guidance_id_deterministic_int32():
     assert first != stable_guidance_id("[test] ffmpeg-frames")
 
 
-def test_entry_hash_changes_with_title_and_content():
-    base = entry_hash("t", "c")
-    assert base == entry_hash("t", "c")
-    assert base != entry_hash("t", "c2")
-    assert base != entry_hash("t2", "c")
-
-
 def test_build_snapshot_entries_imports_pinned_skills(tmp_path: Path):
     repo, sha = _make_skill_repo(tmp_path)
     pins = [_pin(repo, sha, "arxiv-search"), _pin(repo, sha, "ffmpeg-frames")]
@@ -530,6 +519,7 @@ def test_default_snapshot_matches_default_manifest():
     pins = load_manifest(MANIFEST_PATH)
     snapshot = load_snapshot()
 
+    assert len(snapshot) == 14
     assert set(snapshot) == {pin.key for pin in pins}
     for pin in pins:
         entry = snapshot[pin.key]
@@ -584,7 +574,7 @@ def test_migrate_imports_skills_into_guidance(tmp_path: Path):
     assert report["summary"]["added"] == 2
     assert report["summary"]["errors"] == 0
 
-    rows = gm.filter(filter="title == '[octest] ffmpeg-frames'")
+    rows = gm.filter(filter="title = '[octest] ffmpeg-frames'")
     assert rows and rows[0].title == "[octest] ffmpeg-frames"
     assert "Extract frames from a video." in rows[0].content
     assert "ffmpeg -i" in rows[0].content  # bundled script inlined
@@ -617,7 +607,7 @@ def test_migrate_skips_existing_titles_on_rerun(tmp_path: Path):
     assert second["summary"]["skipped"] == 2
 
     # Still exactly one entry per title (no duplicates created).
-    rows = gm.filter(filter="title == '[skiptest] arxiv-search'")
+    rows = gm.filter(filter="title = '[skiptest] arxiv-search'")
     assert len(rows) == 1
 
 
@@ -656,7 +646,7 @@ def test_migrate_overwrite_updates_existing_entry(tmp_path: Path):
     assert second["summary"]["updated"] == 1
     assert second["items"][0]["guidance_id"] == original_id  # id stable
 
-    rows = gm.filter(filter="title == '[ovtest] changing-skill'")
+    rows = gm.filter(filter="title = '[ovtest] changing-skill'")
     assert len(rows) == 1
     assert "Updated description." in rows[0].content
     assert "updated body" in rows[0].content

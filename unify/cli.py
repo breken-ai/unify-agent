@@ -108,20 +108,10 @@ class Chat:
         from unify.session_details import SESSION_DETAILS
 
         SESSION_DETAILS.populate_from_env()
-        db.activate(db.DEFAULT_PROJECT)
-        self._seed_builtins()
+        db.connect()
 
-        self._cm = await run_conversation_manager(project_name=db.DEFAULT_PROJECT)
+        self._cm = await run_conversation_manager()
         self._listener = asyncio.create_task(self._listen())
-
-    @staticmethod
-    def _seed_builtins() -> None:
-        """Make the primitive and guidance catalogues available to the actor."""
-        from unify.function_manager.builtins_catalog import seed_builtin_primitives
-        from unify.guidance_manager.builtins_catalog import seed_builtin_guidance
-
-        seed_builtin_primitives()
-        seed_builtin_guidance()
 
     async def close(self) -> None:
         self._closing.set()

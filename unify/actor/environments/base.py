@@ -115,13 +115,12 @@ class ToolMetadata(BaseModel):
             When set, indicates this environment tool corresponds to a function in
             the FunctionManager backend, enabling automatic exclusion from
             FunctionManager search/list/filter results to prevent overlap.
-            Must be paired with ``function_context`` to identify which DB context
-            the ID belongs to (IDs are only unique within a context).
-        function_context: Which FunctionManager DB context ``function_id``
-            belongs to. Required when ``function_id`` is set.
-            ``"primitive"`` for primitive namespace methods (``Functions/Primitives``),
-            ``"compositional"`` for user-defined functions
-            (``Functions/Compositional``).
+            Must be paired with ``function_context`` to identify which table
+            the ID belongs to (IDs are only unique within a table).
+        function_context: Which table ``function_id`` belongs to. Required
+            when ``function_id`` is set. ``"primitive"`` for primitive
+            namespace methods (the ``primitives`` table), ``"compositional"``
+            for stored functions (the ``functions`` table).
     """
 
     name: str

@@ -16,5 +16,3 @@ import os
 def pytest_configure(config):
     """Signal to the global conftest that this session wants no runtime setup."""
     os.environ["SKIP_UNIFY_TEST_INIT"] = "1"
-    os.environ["UNIFY_TESTS_DELETE_PROJ_ON_START"] = "False"
-    os.environ["UNIFY_TESTS_DELETE_PROJ_ON_EXIT"] = "False"

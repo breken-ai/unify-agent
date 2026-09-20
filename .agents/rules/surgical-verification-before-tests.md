@@ -10,8 +10,7 @@ When fixing infrastructure issues (especially concurrency, race conditions, or f
 
 Tests in this repo have significant overhead:
 - LLM calls (cached: milliseconds, uncached: seconds to minutes)
-- Backend API connections and context setup
-- Fixture initialization and scenario seeding
+- Fixture initialisation and catalogue seeding
 
 A targeted verification script can validate a fix in **seconds** rather than waiting minutes for tests that may not even reliably reproduce the issue.
 

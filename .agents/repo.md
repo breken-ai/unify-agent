@@ -10,7 +10,7 @@ covers *how to work on the code*, not *what the code does*.
 
 Unify implements an AI assistant's brain as a persistent **conversation loop** above a code-writing **`Actor`**, with two **skill libraries** behind it: `FunctionManager` (stored Python functions, the *what*) and `GuidanceManager` (procedures, the *how*). The actor discovers skills before it writes code, runs plans in a persistent Python sandbox, and a storage review after each run distils what worked back into the libraries. Manager methods run inside an **async LLM tool loop** and return a **steerable handle** that supports `ask`, `interject`, `pause`, `resume`, `stop` — all the way down the nesting tree. The skill libraries expose direct CRUD methods as Actor JSON tools (`FunctionManager_*`, `GuidanceManager_*`).
 
-Everything persists in an in-process SQLite store, `unify/db/` (imported as `from unify import db`). There is no backend service, no accounts and no infrastructure: the only external dependency is an LLM provider reached through the sibling `unillm` repo (editable install via `[tool.uv.sources]` in `pyproject.toml`).
+Everything persists in one SQLite file, `unify/db.py` (imported as `from unify import db`): five tables (`functions`, `primitives`, `guidance`, `builtin_guidance`, `messages`) and two views (`all_functions`, `all_guidance`) over each catalogue and its seeded rows. Managers write plain SQL; every filter the model writes is a SQL `WHERE` clause run read-only. There is no backend service, no accounts and no infrastructure: the only external dependency is an LLM provider reached through the sibling `unillm` repo (editable install via `[tool.uv.sources]` in `pyproject.toml`).
 
 The assistant is **reactive**: it acts on the messages it receives and on the work those messages start. There is no scheduler, no timer wheel and no inbound channel other than the in-app chat.
 
@@ -144,14 +144,14 @@ unify/
 │   ├── cli.py               # Terminal chat (`python -m unify`)
 │   ├── actor/               # CodeAct Actor, central orchestrator
 │   ├── conversation_manager/ # The persistent interaction loop (slow brain)
-│   ├── db/                  # The local SQLite store and its expression language
+│   ├── db.py                # The local SQLite store: five tables, two views
 │   ├── guidance_manager/    # Procedures, SOPs
 │   ├── function_manager/    # Stored Python functions and their dependencies
 │   ├── workspace.py         # The assistant's working directory
 │   ├── events/              # Typed event bus
 │   └── common/              # Async tool loop, shared infra
 ├── tests/                   # Pytest suite
-├── scripts/                 # Skill import, builtins seeding, git hooks
+├── scripts/                 # Skill import, git hooks
 ├── docs/                    # Design writeups
 ├── ARCHITECTURE.md          # System design (read first)
 ├── README.md
