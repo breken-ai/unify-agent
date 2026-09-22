@@ -1103,6 +1103,11 @@ def _build_storage_tools(
 # ---------------------------------------------------------------------------
 
 
+# Stop reason of a persistent session that ended normally: its final storage review
+# then reads the trajectory as one finished piece of work, not as an interrupted one.
+SESSION_ENDED = "session ended"
+
+
 def _start_storage_check_loop(
     *,
     trajectory: list[dict],
@@ -1223,7 +1228,15 @@ def _start_storage_check_loop(
         )
 
     stop_context_section = ""
-    if stop_reason:
+    if stop_reason == SESSION_ENDED:
+        stop_context_section = (
+            "## Session End\n\n"
+            "This persistent session has ended normally: the work it was opened "
+            "for is finished. The trajectory below is the complete record of the "
+            "session, so review it as one finished piece of work and store what "
+            "will be reusable in future sessions.\n\n"
+        )
+    elif stop_reason:
         stop_context_section = (
             "## Session Termination Context\n\n"
             "This session was explicitly stopped by the user. The stop reason "
@@ -1501,13 +1514,14 @@ class _StorageCheckHandle(SteerableToolHandle):
         self._stop_reason: Optional[str] = None
         self._active_relay: Optional[asyncio.Task] = None
 
-        # Turn-boundary reviews for persistent sessions. A persist=True loop
-        # never self-completes, so Phase 2 alone would defer distillation to
-        # whenever the session is finally stopped — a session that performs
-        # the same deliverable every turn would never converge. Instead, each
-        # completed turn that ran tools gets a mid-session review of the
-        # trajectory so far; its summary is recorded for the final review and
-        # delivered back into the live loop as a transcript note.
+        # Optional turn-boundary reviews for persistent sessions (off unless
+        # UNIFY_TURN_STORAGE_REVIEWS is set). A persist=True loop never
+        # self-completes, so by default distillation happens once, in Phase 2,
+        # when the session ends: one review of the whole trajectory. A session
+        # that lives long enough for that to be too late can opt into a
+        # mid-session review at each completed turn that ran tools; its summary
+        # is recorded for the final review and delivered back into the live
+        # loop as a transcript note.
         self._turn_reviews_enabled = bool(turn_reviews_enabled)
         self._turn_review_task: Optional[asyncio.Task] = None
         self._turn_review_handle: Optional["AsyncToolLoopHandle"] = None
@@ -4368,16 +4382,22 @@ class CodeActActor(BaseCodeActActor):
         # Update agent context with handle reference
         new_ctx.handle = handle
 
-        # Wrap in StorageCheckHandle for post-completion function review.
-        # Persistent sessions additionally review at each completed turn —
-        # a persist loop never self-completes, so without turn reviews a
-        # recurring conversational deliverable would never distill.
+        # Wrap in StorageCheckHandle for post-completion function review. A
+        # persistent session is reviewed once, when it ends (its stop is a
+        # deliberate one, which Phase 2 still reviews); turn-boundary reviews
+        # are an opt-in for sessions that live too long to wait for that.
         if effective_can_store:
+            from unify.settings import SETTINGS
+
             handle = _StorageCheckHandle(
                 inner=handle,
                 actor=self,
                 meter=run_meter,
-                turn_reviews_enabled=effective_can_store and bool(persist),
+                turn_reviews_enabled=(
+                    effective_can_store
+                    and bool(persist)
+                    and bool(SETTINGS.UNIFY_TURN_STORAGE_REVIEWS)
+                ),
             )
             # Tracked so ``close()`` can end a review still in flight. The
             # set is weak: a finished handle the caller has dropped must not

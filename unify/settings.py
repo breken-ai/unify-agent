@@ -70,6 +70,11 @@ class ProductionSettings(BaseSettings):
     # OpenRouter — used for ``*@openrouter`` endpoints (the default model).
     OPENROUTER_API_KEY: SecretStr = SecretStr("")
     UNIFY_VALIDATE_LLM_PROVIDERS: bool = True
+    # Storage review of a persistent session: by default it runs once, when the session
+    # ends, over the whole trajectory. Set true to also review at every completed turn
+    # that ran tools (for sessions that live long enough that waiting for the end would
+    # defer distillation indefinitely).
+    UNIFY_TURN_STORAGE_REVIEWS: bool = False
 
     # ─────────────────────────────────────────────────────────────────────────
     # Builtins Catalogue
@@ -110,6 +115,7 @@ class ProductionSettings(BaseSettings):
         "UNIFY_TERMINAL_LOG",
         "PYTEST_LOG_TO_FILE",
         "UNIFY_VALIDATE_LLM_PROVIDERS",
+        "UNIFY_TURN_STORAGE_REVIEWS",
         mode="before",
     )
     @classmethod

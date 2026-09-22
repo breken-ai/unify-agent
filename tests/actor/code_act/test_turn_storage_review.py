@@ -1,13 +1,11 @@
 """Tests for mid-session (turn-boundary) storage reviews.
 
-A ``persist=True`` act loop never self-completes, so the Phase-2 storage
-check alone would defer distillation to whenever the session is finally
-stopped — a session that produces the same deliverable every turn would
-never converge onto a stored function. ``_StorageCheckHandle`` therefore
-reviews the trajectory at each completed turn (``type="response"``
-notification) that ran tools, records the summary for the final review,
-and leaves a transcript note in the live loop so the next request can
-execute what was stored.
+By default a persistent session is reviewed once, when it ends, over the
+whole trajectory. ``_StorageCheckHandle`` can opt into reviewing at each
+completed turn (``type="response"`` notification) that ran tools
+(``UNIFY_TURN_STORAGE_REVIEWS``), recording the summary for the final
+review and leaving a transcript note in the live loop so the next request
+can execute what was stored.
 
 All tests here are symbolic infrastructure tests: the inner handle and the
 review loop are mocked; what is under test is the trigger, the gating, the
@@ -348,3 +346,45 @@ async def test_turn_boundaries_coalesce_while_review_in_flight():
                 break
             await asyncio.sleep(0.01)
         assert handle.done()
+
+
+def test_turn_reviews_are_opt_in():
+    """A persistent session distils once, at its end; per-turn reviews are a setting."""
+    from unify.settings import SETTINGS
+
+    assert SETTINGS.UNIFY_TURN_STORAGE_REVIEWS is False
+
+
+def test_session_end_review_frames_the_whole_session():
+    """Ending a session with ``SESSION_ENDED`` reviews it as finished work, not as an
+    interrupted one."""
+    from unify.actor.code_act_actor import SESSION_ENDED, _start_storage_check_loop
+
+    prompts: list[str] = []
+    client = MagicMock()
+    client.set_system_message = lambda text: prompts.append(text)
+    with (
+        patch("unify.actor.code_act_actor.new_llm_client", return_value=client),
+        patch(
+            "unify.actor.code_act_actor.start_async_tool_loop",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "unify.actor.code_act_actor._build_storage_tools",
+            return_value=({}, [], []),
+        ),
+    ):
+        for reason in (SESSION_ENDED, "user cancelled"):
+            _start_storage_check_loop(
+                trajectory=[
+                    {"role": "user", "content": "do work"},
+                    {"role": "tool", "content": "worked"},
+                ],
+                ask_tools={},
+                actor=_mock_actor(),
+                original_result="done",
+                stop_reason=reason,
+            )
+    ended, cancelled = prompts
+    assert "Session End" in ended and "explicitly stopped" not in ended
+    assert "explicitly stopped" in cancelled and "user cancelled" in cancelled

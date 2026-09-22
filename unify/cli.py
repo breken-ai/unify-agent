@@ -416,7 +416,10 @@ class Act:
             if not line:
                 continue
             if line in {"/quit", "/exit", "/q"}:
-                await self._handle.stop("session closed")
+                from unify.actor.code_act_actor import SESSION_ENDED
+
+                self._progress("session ended; reviewing the work for storage")
+                await self._handle.stop(SESSION_ENDED)
                 return
             if not self._pending_clarifications.empty():
                 clar = await self._pending_clarifications.get()
