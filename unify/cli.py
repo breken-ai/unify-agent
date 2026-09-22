@@ -18,6 +18,7 @@ Runtime logs go to ``<UNIFY_HOME>/logs`` and stay off the terminal unless
 from __future__ import annotations
 
 import argparse
+import json
 import asyncio
 import os
 import shutil
@@ -50,6 +51,11 @@ given as "-". Progress lines stream to stderr while the actor works; the
 result goes to stdout. When the actor asks a question, type the answer and
 press Enter. With --persist the actor stays alive after answering: each
 further line is a follow-up in the same sandbox, /quit ends the session.
+With --jsonl the session speaks newline-delimited JSON instead, for a
+program driving the actor: each stdin line is {"message": "..."} (a
+follow-up, which may span lines) or {"quit": true}; each stdout line is
+{"type": "result" | "response" | "question" | "storage" | "ended", ...}.
+Progress still goes to stderr.
 """
 
 
@@ -125,6 +131,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--quiet",
         action="store_true",
         help="do not stream progress lines",
+    )
+    act.add_argument(
+        "--jsonl",
+        action="store_true",
+        help="newline-delimited JSON on stdin and stdout, for a program driving "
+        "the actor (see the description)",
     )
 
     args = parser.parse_args(argv)
@@ -370,6 +382,10 @@ class Act:
         if not self._args.quiet:
             print(f"  · {text}", file=sys.stderr, flush=True)
 
+    def _emit(self, **payload: object) -> None:
+        """One JSON line on stdout (``--jsonl``)."""
+        print(json.dumps(payload, default=str), flush=True)
+
     async def _watch_notifications(self) -> None:
         while not self._closing.is_set():
             notif = await self._handle.next_notification()
@@ -380,10 +396,20 @@ class Act:
             if kind == "response":
                 # A persist-mode turn finished; its answer is the result of the
                 # follow-up the user typed.
-                print(f"\n{notif.get('content', '')}\n", flush=True)
+                if self._args.jsonl:
+                    self._emit(type="response", content=notif.get("content", ""))
+                else:
+                    print(f"\n{notif.get('content', '')}\n", flush=True)
             elif kind in ("storage_review_complete", "turn_storage_review_complete"):
                 verdict = "stored" if notif.get("success") else "storage review failed"
-                self._progress(f"{verdict}: {notif.get('message', '')}")
+                if self._args.jsonl:
+                    self._emit(
+                        type="storage",
+                        success=bool(notif.get("success")),
+                        message=notif.get("message", ""),
+                    )
+                else:
+                    self._progress(f"{verdict}: {notif.get('message', '')}")
             else:
                 text = notif.get("message") or notif.get("result_summary") or kind
                 self._progress(str(text))
@@ -393,7 +419,14 @@ class Act:
             clar = await self._handle.next_clarification()
             if not clar:
                 continue
-            print(f"\nactor asks> {clar.get('question', '')}", flush=True)
+            if self._args.jsonl:
+                self._emit(
+                    type="question",
+                    call_id=str(clar.get("call_id") or ""),
+                    question=clar.get("question", ""),
+                )
+            else:
+                print(f"\nactor asks> {clar.get('question', '')}", flush=True)
             await self._pending_clarifications.put(clar)
 
     # ── input ────────────────────────────────────────────────────────────
@@ -410,11 +443,30 @@ class Act:
             raw = await reader.readline()
             if not raw:
                 if self._args.persist:
-                    await self._handle.stop("session closed")
+                    from unify.actor.code_act_actor import SESSION_ENDED
+
+                    await self._handle.stop(SESSION_ENDED)
                 return
             line = raw.decode(errors="replace").strip()
             if not line:
                 continue
+            if self._args.jsonl:
+                try:
+                    item = json.loads(line)
+                except ValueError:
+                    self._progress(
+                        f"ignored a stdin line that is not JSON: {line[:80]!r}",
+                    )
+                    continue
+                if not isinstance(item, dict):
+                    continue
+                if item.get("quit"):
+                    line = "/quit"
+                else:
+                    message = item.get("message")
+                    if not isinstance(message, str) or not message:
+                        continue
+                    line = message
             if line in {"/quit", "/exit", "/q"}:
                 from unify.actor.code_act_actor import SESSION_ENDED
 
@@ -451,7 +503,7 @@ class Act:
             asyncio.create_task(self._watch_clarifications()),
         ]
         reader = None
-        if interactive and (clarify or args.persist):
+        if (interactive and (clarify or args.persist)) or args.jsonl:
             reader = asyncio.create_task(self._read_lines())
         try:
             result = await asyncio.wait_for(self._handle.result(), timeout=args.timeout)
@@ -475,12 +527,19 @@ class Act:
             await asyncio.sleep(0.2)
         for task in watchers:
             task.cancel()
+        if args.jsonl:
+            self._emit(type="ended")
         return 0
 
     def _print_result(self, result: object) -> None:
+        if self._args.jsonl:
+            self._emit(
+                type="result",
+                content=result if isinstance(result, str) else str(result),
+                run_stats=getattr(self._handle, "run_stats", {}) or {},
+            )
+            return
         if self._args.json:
-            import json
-
             payload = {
                 "result": (
                     result if isinstance(result, (str, dict, list)) else str(result)
