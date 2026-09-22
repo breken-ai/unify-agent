@@ -221,7 +221,7 @@ The Actor implements a **gating policy**: until the LLM has queried both `Functi
 
 **Files:** `unify/actor/code_act_actor.py` (`_start_storage_check_loop`)
 
-After a run completes — and after each completed turn of a persistent session — a **storage review** loop reads the trajectory and decides whether anything is worth persisting: a stored function (code that worked) or a procedure (how to compose things). Often nothing is.
+After a run completes — and when a persistent session ends (`/quit`), once, over the whole session; a review at every completed turn is an opt-in, `UNIFY_TURN_STORAGE_REVIEWS`) — a **storage review** loop reads the trajectory and decides whether anything is worth persisting: a stored function (code that worked) or a procedure (how to compose things). Often nothing is.
 
 ---
 
